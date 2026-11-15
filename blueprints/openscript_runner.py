@@ -162,7 +162,9 @@ MAX_LOGS_REPORTED = 20
 # configuration file and inside the folder the deployment keeps on a named
 # volume, so a trader's schedule outlives a rebuild. It is this module's file
 # alone; nothing else reads or writes it.
-SCHEDULES_FILE = Path("strategies") / "openscript_runner_schedules.json"
+from utils.broker_context import BrokerPath
+
+SCHEDULES_FILE = BrokerPath("openscript_schedules")
 
 # Writers of the file above. Requests write it and scheduled jobs only read it,
 # and under the production server both of those are green while on the

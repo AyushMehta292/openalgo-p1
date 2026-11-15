@@ -1332,6 +1332,7 @@ def get_dashboard_data():
         from database.auth_db import get_api_key_for_tradingview, get_auth_token
         from database.settings_db import get_analyze_mode
         from services.funds_service import get_funds
+        from utils.broker_context import BROKERS, broker_context, current_broker
 
         AUTH_TOKEN = get_auth_token(login_username)
 
@@ -1349,31 +1350,45 @@ def get_dashboard_data():
                 }
             ), 401
 
-        # Check if in analyze mode
-        if get_analyze_mode():
-            api_key = get_api_key_for_tradingview(login_username)
-            if api_key:
-                success, response, status_code = get_funds(api_key=api_key)
-            else:
-                return jsonify(
-                    {"status": "error", "message": "API key required for analyze mode"}
-                ), 400
-        else:
+        # Analyzer balances belong to the signed-in user. The OpenAlgo API key
+        # is not required: account setup writes that key into a broker database,
+        # and setup has no broker selected, so the key was never stored.
+        # The session names the broker when the tab did not.
+        def _read_margin():
+            if get_analyze_mode():
+                from sandbox.fund_manager import get_user_funds
+
+                funds = get_user_funds(login_username)
+                if not funds:
+                    return (
+                        jsonify({"status": "error", "message": "Could not read analyzer funds"}),
+                        500,
+                    )
+                return jsonify({"status": "success", "data": funds})
             success, response, status_code = get_funds(auth_token=AUTH_TOKEN, broker=broker)
+            if not success:
+                logger.error(
+                    f"Failed to get funds data: {response.get('message', 'Unknown error')}"
+                )
+                return (
+                    jsonify(
+                        {
+                            "status": "error",
+                            "message": response.get("message", "Failed to get funds"),
+                        }
+                    ),
+                    status_code,
+                )
+            margin_data = response.get("data", {})
+            if not margin_data:
+                logger.error(f"Failed to get margin data for user {login_username}")
+                return jsonify({"status": "error", "message": "Failed to get margin data"}), 500
+            return jsonify({"status": "success", "data": margin_data})
 
-        if not success:
-            logger.error(f"Failed to get funds data: {response.get('message', 'Unknown error')}")
-            return jsonify(
-                {"status": "error", "message": response.get("message", "Failed to get funds")}
-            ), status_code
-
-        margin_data = response.get("data", {})
-
-        if not margin_data:
-            logger.error(f"Failed to get margin data for user {login_username}")
-            return jsonify({"status": "error", "message": "Failed to get margin data"}), 500
-
-        return jsonify({"status": "success", "data": margin_data})
+        if current_broker() not in BROKERS and broker in BROKERS:
+            with broker_context(broker):
+                return _read_margin()
+        return _read_margin()
 
     except Exception as e:
         logger.exception(f"Error fetching dashboard data: {e}")

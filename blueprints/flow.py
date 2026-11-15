@@ -1178,6 +1178,11 @@ def trigger_webhook(token):
     1. URL query parameter: ?secret=your_secret (for Chartink, etc.)
     2. Payload field: {"secret": "your_secret", ...} (for TradingView, etc.)
     """
+    from database.flow_db import get_workflow_by_webhook_token
+    from utils.broker_context import select_broker
+
+    if not select_broker(lambda: get_workflow_by_webhook_token(token) is not None):
+        return jsonify({"error": "Unknown webhook"}), 404
     url_secret = request.args.get("secret")
     payload = _read_webhook_payload()
     return _execute_webhook(token, webhook_data=payload, url_secret=url_secret)
@@ -1192,6 +1197,11 @@ def trigger_webhook_with_symbol(token, symbol):
 
     The symbol is automatically injected into the webhook data.
     """
+    from database.flow_db import get_workflow_by_webhook_token
+    from utils.broker_context import select_broker
+
+    if not select_broker(lambda: get_workflow_by_webhook_token(token) is not None):
+        return jsonify({"error": "Unknown webhook"}), 404
     url_secret = request.args.get("secret")
     payload = _read_webhook_payload()
     payload["symbol"] = symbol
