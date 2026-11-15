@@ -181,6 +181,15 @@ def _overlay_getitem(self, key):
         if value is None:
             raise KeyError(key)
         return value
+    if key in ENV_VARS.values():
+        # Broker keys come from the current broker's database. With no broker
+        # selected, the .env values are not used: .env does not name a broker.
+        from utils.broker_context import BROKERS, current_broker
+
+        broker = current_broker()
+        if broker not in BROKERS:
+            return ""
+        return _keys_from_database(broker).get(key, "")
     return _base_getitem(self, key)
 
 
@@ -210,6 +219,51 @@ if "_openalgo_base_getitem" not in _ENVIRON_TYPE.__dict__:
     _ENVIRON_TYPE.__getitem__ = _overlay_getitem
     _ENVIRON_TYPE.__iter__ = _overlay_iter
     _ENVIRON_TYPE.__len__ = _overlay_len
+
+
+_db_key_cache: dict[str, dict] = {}
+
+
+def forget_cached_broker_keys(broker: str | None = None) -> None:
+    """Drop keys cached for the environment overlay after a save."""
+    if broker is None:
+        _db_key_cache.clear()
+    else:
+        _db_key_cache.pop(broker, None)
+
+
+def _keys_from_database(broker: str) -> dict:
+    """The five environment variables for ``broker``, from that broker's database."""
+    cached = _db_key_cache.get(broker)
+    if cached is not None:
+        return cached
+    from database.broker_keys_db import get_broker_keys
+
+    stored = get_broker_keys(broker)
+    host = (_base_getitem(os.environ, "HOST_SERVER") if _has_env("HOST_SERVER") else "") or ""
+    host = str(host).rstrip("/")
+    redirect = ""
+    if stored is not None:
+        redirect = stored.redirect_url or ""
+    if not redirect and host:
+        redirect = f"{host}/{broker}/callback"
+    values = {
+        "BROKER_API_KEY": (stored.api_key if stored else "") or "",
+        "BROKER_API_SECRET": (stored.api_secret if stored else "") or "",
+        "BROKER_API_KEY_MARKET": (stored.api_key_market if stored else "") or "",
+        "BROKER_API_SECRET_MARKET": (stored.api_secret_market if stored else "") or "",
+        "REDIRECT_URL": redirect,
+    }
+    _db_key_cache[broker] = values
+    return values
+
+
+def _has_env(var: str) -> bool:
+    try:
+        _base_getitem(os.environ, var)
+        return True
+    except KeyError:
+        return False
 
 
 def _process_value(var):
@@ -330,15 +384,8 @@ def env_file_values():
 
 
 def env_broker(values=None):
-    """The broker the .env file sets keys for, or None when it sets none.
-
-    The .env file sets a broker when REDIRECT_URL names one and BROKER_API_KEY
-    is not empty.
-    """
-    values = values if values is not None else env_file_values()
-    if not values["api_key"]:
-        return None
-    return broker_from_redirect_url(values["redirect_url"])
+    """No broker is selected from .env. Keys live in each broker's database."""
+    return None
 
 
 #: API key layouts some brokers need, as "field:::field". (separators, message)
@@ -469,6 +516,29 @@ def _signed_in_since_rollover(username, broker):
     return login is not None and login >= boundary
 
 
+def _across_broker_databases(read):
+    """Call ``read`` in the open database, or in each broker database when none is selected.
+
+    ``read`` returns a broker id or None. The first broker id wins. The auth
+    session is released between files so the next connection opens the next file.
+    """
+    from database import broker_keys_db
+    from database.auth_db import db_session
+    from utils.broker_context import BROKERS, broker_context, current_broker
+
+    if not broker_keys_db.uses_project_database() or current_broker() in BROKERS:
+        return read()
+    for name in BROKERS:
+        with broker_context(name):
+            try:
+                found = read()
+            finally:
+                db_session.remove()
+            if found:
+                return found
+    return None
+
+
 def logged_in_broker():
     """The broker of the stored, unrevoked broker session, or None.
 
@@ -478,7 +548,7 @@ def logged_in_broker():
     """
     from database.auth_db import Auth
 
-    def _load():
+    def _query():
         try:
             for row in Auth.query.filter_by(is_revoked=False).all():
                 if row.auth and row.broker:
@@ -487,6 +557,10 @@ def logged_in_broker():
         except Exception:
             logger.exception("Could not read which broker is logged in")
             return MISSING
+
+    def _load():
+        found = _across_broker_databases(_query)
+        return MISSING if found is MISSING else found
 
     value = _logged_in_broker_cache.get_or_load(
         "broker", _load, should_cache=lambda v: v is not MISSING
@@ -509,16 +583,19 @@ def live_broker():
     """
     from database.auth_db import Auth
 
-    try:
-        rows = Auth.query.filter_by(is_revoked=False).all()
-        for row in rows:
-            if not (row.auth and row.broker):
-                continue
-            if _never_expires(row.broker) or _signed_in_since_rollover(row.name, row.broker):
-                return row.broker
-    except Exception:
-        logger.exception("Could not read which broker is logged in")
-    return None
+    def _query():
+        try:
+            rows = Auth.query.filter_by(is_revoked=False).all()
+            for row in rows:
+                if not (row.auth and row.broker):
+                    continue
+                if _never_expires(row.broker) or _signed_in_since_rollover(row.name, row.broker):
+                    return row.broker
+        except Exception:
+            logger.exception("Could not read which broker is logged in")
+        return None
+
+    return _across_broker_databases(_query)
 
 
 def _apply_unlocked(keys):

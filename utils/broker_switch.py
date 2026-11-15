@@ -122,11 +122,20 @@ def switch_refusal(live_broker, username):
     Returns:
         str | None: A sentence for the trader naming what still runs.
     """
+    from utils.broker_context import BROKERS, broker_context, current_broker
     from utils.broker_keys import broker_title
 
     name = broker_title(live_broker)
+
+    def _checked():
+        return _blockers(username)
+
     try:
-        strategy_runs, openscript_runs, python_runs, protected = _blockers(username)
+        if live_broker in BROKERS and current_broker() != live_broker:
+            with broker_context(live_broker):
+                strategy_runs, openscript_runs, python_runs, protected = _checked()
+        else:
+            strategy_runs, openscript_runs, python_runs, protected = _checked()
     except Exception:
         logger.exception("Could not check what still runs on the broker session")
         return (
