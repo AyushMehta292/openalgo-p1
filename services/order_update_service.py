@@ -186,6 +186,41 @@ def stop_all_order_update_adapters() -> None:
             _stop_locked(user_id)
 
 
+def scan_stored_broker_sessions(start_adapter=None) -> None:
+    """Start an order feed for each stored session that is still usable.
+
+    Fyers, Delta Exchange, and Groww are funds-checked first. A token from
+    before today's rollover still starts when that check accepts it. Any
+    other broker still has to have logged in during the current trading day.
+    """
+    from database.auth_db import Auth
+    from utils.broker_context import BROKERS, current_broker, run_for_each_broker
+    from utils.daily_token_check import check_broker_token
+    from utils.session import has_login_this_trading_session
+
+    starter = start_adapter or start_order_update_adapter
+
+    def _scan():
+        broker = current_broker()
+        if broker in BROKERS:
+            check_broker_token(broker)
+        sessions = Auth.query.filter_by(is_revoked=False).all()
+        for auth_obj in sessions:
+            if not (auth_obj.name and auth_obj.broker):
+                continue
+            if broker not in BROKERS and not has_login_this_trading_session(auth_obj.name):
+                logger.info(
+                    f"Order-update adapter not started for "
+                    f"{auth_obj.broker}/{auth_obj.name}: no login since today's "
+                    "session rollover, so the stored broker token is stale. "
+                    "It starts on the next broker login."
+                )
+                continue
+            starter(auth_obj.name, auth_obj.broker)
+
+    run_for_each_broker(_scan)
+
+
 def start_order_update_adapters_on_boot(db_ready=None) -> None:
     """Start adapters for existing non-revoked broker sessions at app startup.
 
@@ -234,31 +269,7 @@ def start_order_update_adapters_on_boot(db_ready=None) -> None:
             return
 
         try:
-            from database.auth_db import Auth
-            from utils.session import has_login_this_trading_session
-
-            sessions = Auth.query.filter_by(is_revoked=False).all()
-            for auth_obj in sessions:
-                if not (auth_obj.name and auth_obj.broker):
-                    continue
-                # is_revoked alone is not proof the token still works. Indian
-                # broker tokens die at the daily rollover (~03:00 IST), but the
-                # row is only flagged revoked by the auto-expiry sweep, which
-                # runs from a before_request hook and therefore needs a browser
-                # request to fire. Between the rollover and the first request,
-                # a restart would otherwise start an adapter on a token the
-                # broker killed hours ago and sit in a 401 reconnect loop.
-                if not has_login_this_trading_session(auth_obj.name):
-                    logger.info(
-                        f"Order-update adapter not started for "
-                        f"{auth_obj.broker}/{auth_obj.name}: no login since today's "
-                        "session rollover, so the stored broker token is stale. "
-                        "It starts on the next broker login."
-                    )
-                    continue
-                start_order_update_adapter(auth_obj.name, auth_obj.broker)
-            if not sessions:
-                logger.debug("No active broker sessions found; no order-update adapters started")
+            scan_stored_broker_sessions()
         except Exception:
             logger.exception("Order-update adapter boot scan failed")
         finally:

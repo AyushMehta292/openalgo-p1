@@ -164,6 +164,7 @@ _ENVIRON_TYPE = type(os.environ)
 _base_getitem = _ENVIRON_TYPE.__dict__.get("_openalgo_base_getitem") or _ENVIRON_TYPE.__getitem__
 _base_iter = _ENVIRON_TYPE.__dict__.get("_openalgo_base_iter") or _ENVIRON_TYPE.__iter__
 _base_len = _ENVIRON_TYPE.__dict__.get("_openalgo_base_len") or _ENVIRON_TYPE.__len__
+_base_contains = _ENVIRON_TYPE.__dict__.get("_openalgo_base_contains") or _ENVIRON_TYPE.__contains__
 
 
 def _staged_here(environ):
@@ -212,13 +213,32 @@ def _overlay_len(self):
     return sum(1 for _ in _overlay_iter(self))
 
 
+def _overlay_contains(self, key):
+    """Whether the process actually has ``key``.
+
+    ``__getitem__`` returns "" for a broker variable when no broker is
+    selected, so the default membership test would say the variable is set
+    when it is not, and deleting it would raise.
+    """
+    staged = _staged_here(self)
+    if staged is not None and key in staged:
+        return staged[key] is not None
+    try:
+        _base_getitem(self, key)
+    except KeyError:
+        return False
+    return True
+
+
 if "_openalgo_base_getitem" not in _ENVIRON_TYPE.__dict__:
     _ENVIRON_TYPE._openalgo_base_getitem = _base_getitem
     _ENVIRON_TYPE._openalgo_base_iter = _base_iter
     _ENVIRON_TYPE._openalgo_base_len = _base_len
+    _ENVIRON_TYPE._openalgo_base_contains = _base_contains
     _ENVIRON_TYPE.__getitem__ = _overlay_getitem
     _ENVIRON_TYPE.__iter__ = _overlay_iter
     _ENVIRON_TYPE.__len__ = _overlay_len
+    _ENVIRON_TYPE.__contains__ = _overlay_contains
 
 
 _db_key_cache: dict[str, dict] = {}
@@ -578,10 +598,12 @@ def live_broker():
 
     A broker counts as logged in while its token is stored and not revoked and
     it was signed in to during the current trading day (or it never expires: a
-    crypto broker). A token left from an earlier day is dead at the broker and
-    does not hold the slot.
+    crypto broker). Fyers, Delta Exchange, and Groww stay live across that
+    boundary until a funds check revokes the token. Any other token left from
+    an earlier day does not hold the slot.
     """
     from database.auth_db import Auth
+    from utils.broker_context import BROKERS
 
     def _query():
         try:
@@ -589,7 +611,11 @@ def live_broker():
             for row in rows:
                 if not (row.auth and row.broker):
                     continue
-                if _never_expires(row.broker) or _signed_in_since_rollover(row.name, row.broker):
+                if (
+                    row.broker in BROKERS
+                    or _never_expires(row.broker)
+                    or _signed_in_since_rollover(row.name, row.broker)
+                ):
                     return row.broker
         except Exception:
             logger.exception("Could not read which broker is logged in")

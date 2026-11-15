@@ -558,6 +558,17 @@ def create_app():
         if hasattr(app, "db_ready") and not app.db_ready.is_set():
             app.db_ready.wait(timeout=30)
 
+        # First request of the trading day for this tab's broker. The clock
+        # does not revoke the token; the broker's funds answer does.
+        broker = session.get("broker")
+        if broker:
+            from utils.daily_token_check import check_broker_token
+
+            try:
+                check_broker_token(broker)
+            except Exception:
+                logger.exception("Daily token check failed")
+
     @app.before_request
     def drop_ended_sessions():
         """Clear a session a logout elsewhere ended, or a broker-less one past the rollover.
@@ -606,19 +617,29 @@ def create_app():
         ):  # WebSocket reload endpoint
             return
 
-        # Check if user is logged in and session is expired
+        # Check if user is logged in and session is expired.
+        # Fyers, Delta Exchange, and Groww never reach this because of the
+        # clock: is_session_valid() stays true until a funds check revokes the
+        # token. A request that has not named a broker does not revoke either.
+        # A named broker outside those three still loses its token at the
+        # rollover, so a stale token cannot be resumed (#1419).
         if session.get("logged_in") and not is_session_valid():
-            logger.info(f"Session expired for user: {session.get('user')} - revoking tokens")
-            # Revoke the DB broker token at the daily rollover (same as manual logout).
-            # Indian broker tokens are invalidated broker-side at ~3 AM IST, so a
-            # preserved token is dead anyway; keeping it (revoke_db_tokens=False) made
-            # the next login's session-resume path reuse a stale token and skip broker
-            # OAuth, leaving the WebSocket feed dead with 403s until a restart (#1419).
-            # Revoking sets is_revoked=True so _try_resume_broker_session refuses to
-            # resume and forces a fresh broker authentication. Crypto/24-7 brokers never
-            # reach this branch (is_session_valid() stays True when expiry is disabled).
-            revoke_user_tokens(revoke_db_tokens=True)
-            session.clear()
+            from utils.daily_token_check import clock_may_revoke
+
+            broker = session.get("broker")
+            if clock_may_revoke(broker):
+                logger.info(f"Session expired for user: {session.get('user')} - revoking tokens")
+                revoke_user_tokens(revoke_db_tokens=True)
+                session.clear()
+            elif broker:
+                logger.info(
+                    "Session clock passed for %s; no broker token revoked",
+                    session.get("user"),
+                )
+                session.clear()
+            # No broker on this request (a page load, before the tab header).
+            # Leave the cookie. The next request that names a broker funds-checks
+            # that token instead of revoking it because the clock passed.
             # Don't redirect here, let individual routes handle it
 
     @app.errorhandler(400)
@@ -917,6 +938,16 @@ def setup_environment(app):
 
             # Signal that DB tables are ready (unblocks cache restoration)
             app.db_ready.set()
+
+            # Ask each broker about the token already stored. A restart after
+            # 03:00 must not wait for a browser request, and a failure to reach
+            # the broker leaves the token in place.
+            try:
+                from utils.daily_token_check import check_each_broker
+
+                check_each_broker()
+            except Exception:
+                logger.exception("Startup funds check failed")
 
             # Initialize schedulers AFTER database initialization
             try:
