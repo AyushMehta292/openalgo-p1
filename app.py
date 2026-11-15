@@ -571,10 +571,19 @@ def create_app():
         The header is set by the page from sessionStorage, which is per tab.
         Callbacks and the post-login redirect name the broker in the URL.
         The shared sign-in cookie is not consulted.
+
+        ``/api/v1/*`` callers (the Python host, OpenScript, the openalgo SDK)
+        often name no broker. For those, the verified platform API key picks
+        the broker whose ``api_keys`` row matches, the same way webhooks use
+        ``select_broker``.
         """
         from flask import g, request
 
-        from utils.broker_context import broker_from_http_request, push_broker
+        from utils.broker_context import (
+            broker_from_http_request,
+            push_broker,
+            select_broker_for_api_key,
+        )
 
         if request.path.startswith(("/static/", "/assets/", "/flow/webhook/", "/chartink/webhook/", "/strategy/webhook/")):
             return
@@ -587,6 +596,15 @@ def create_app():
             request.args.get("broker", ""),
             body_broker,
         )
+        if not broker and request.path.startswith("/api/v1/"):
+            apikey = ""
+            if request.method in ("POST", "PUT", "PATCH") and request.is_json:
+                apikey = str((request.get_json(silent=True) or {}).get("apikey") or "")
+            if not apikey:
+                apikey = str(request.args.get("apikey") or "")
+            if apikey and select_broker_for_api_key(apikey):
+                _start_services_for_selected_broker()
+            return
         if not broker:
             return
         g._tab_state = {"broker": broker}

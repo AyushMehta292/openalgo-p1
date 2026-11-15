@@ -127,6 +127,21 @@ def select_broker(predicate: Callable[[], bool]) -> bool:
     return False
 
 
+def select_broker_for_api_key(apikey: str) -> bool:
+    """Enter the broker whose platform ``api_keys`` row verifies ``apikey``.
+
+    ``/api/v1`` callers (Python strategies, OpenScript, the openalgo SDK) often
+    send no ``X-OpenAlgo-Broker`` header. The verified key picks the directory,
+    the same way a webhook finds its strategy.
+    """
+    if not (apikey or "").strip():
+        return False
+    from database.auth_db import verify_api_key
+
+    key = apikey.strip()
+    return select_broker(lambda: verify_api_key(key) is not None)
+
+
 def run_for_each_broker(func: Callable, *args, **kwargs) -> None:
     """Call ``func`` once inside each broker directory.
 

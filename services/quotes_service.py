@@ -1,7 +1,7 @@
 import importlib
 from typing import Any
 
-from database.auth_db import get_auth_token_broker
+from database.auth_db import api_key_auth_error_message, get_auth_token_broker
 from database.token_db import get_token
 from services.broker_busy import BrokerBusyError, broker_busy_result
 from utils.constants import VALID_EXCHANGES
@@ -189,7 +189,14 @@ def get_quotes(
             api_key, include_feed_token=True
         )
         if AUTH_TOKEN is None:
-            return False, {"status": "error", "message": "Invalid openalgo apikey"}, 403
+            return (
+                False,
+                {
+                    "status": "error",
+                    "message": api_key_auth_error_message(AUTH_TOKEN, broker_name),
+                },
+                403,
+            )
         return get_quotes_with_auth(AUTH_TOKEN, FEED_TOKEN, broker_name, symbol, exchange)
 
     # Case 2: Direct internal call with auth_token and broker
@@ -362,7 +369,14 @@ def get_multiquotes(
             api_key, include_feed_token=True
         )
         if AUTH_TOKEN is None:
-            return False, {"status": "error", "message": "Invalid openalgo apikey"}, 403
+            return (
+                False,
+                {
+                    "status": "error",
+                    "message": api_key_auth_error_message(AUTH_TOKEN, broker_name),
+                },
+                403,
+            )
         return get_multiquotes_with_auth(AUTH_TOKEN, FEED_TOKEN, broker_name, symbols)
 
     # Case 2: Direct internal call with auth_token and broker

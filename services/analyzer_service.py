@@ -7,7 +7,7 @@ from typing import Any, Dict, Optional, Tuple
 from database.analyzer_db import AnalyzerLog, db_session
 from database.apilog_db import async_log_order
 from database.apilog_db import executor as log_executor
-from database.auth_db import get_auth_token_broker
+from database.auth_db import api_key_auth_error_message, get_auth_token_broker
 from database.settings_db import get_analyze_mode, set_analyze_mode
 from utils.keyed_locks import LockBusy
 from utils.logging import get_logger
@@ -291,7 +291,10 @@ def get_analyzer_status(
 
         AUTH_TOKEN, broker_name = get_auth_token_broker(api_key)
         if AUTH_TOKEN is None:
-            error_response = {"status": "error", "message": "Invalid openalgo apikey"}
+            error_response = {
+                "status": "error",
+                "message": api_key_auth_error_message(AUTH_TOKEN, broker_name),
+            }
             # Skip logging for invalid API keys to prevent database flooding
             return False, error_response, 403
 
@@ -343,7 +346,10 @@ def toggle_analyzer_mode(
 
         AUTH_TOKEN, broker_name = get_auth_token_broker(api_key)
         if AUTH_TOKEN is None:
-            error_response = {"status": "error", "message": "Invalid openalgo apikey"}
+            error_response = {
+                "status": "error",
+                "message": api_key_auth_error_message(AUTH_TOKEN, broker_name),
+            }
             # Skip logging for invalid API keys to prevent database flooding
             return False, error_response, 403
 

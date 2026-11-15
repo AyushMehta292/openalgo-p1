@@ -1572,11 +1572,30 @@ def get_broker_name(provided_api_key):
     return None
 
 
+def api_key_auth_error_message(auth_token, broker_name=None) -> str:
+    """Human message when ``get_auth_token_broker`` returned no token.
+
+    A valid platform API key whose broker session is revoked still carries the
+    broker name in the second (or last) slot, so callers can say "log in again"
+    instead of blaming the key.
+    """
+    if auth_token is not None:
+        return ""
+    if broker_name:
+        return f"Broker session expired. Log in to {broker_name} again."
+    return "Invalid openalgo apikey"
+
+
 def get_auth_token_broker(provided_api_key, include_feed_token=False):
     """Auth token, feed token (optional) and broker for an API key, its broker's keys pinned.
 
     utils.broker_keys.pin_keys_for and _read_coherently: the token returned
     and the keys the request sends with it belong to one configuration.
+
+    On failure the token slot is None. An unknown platform API key returns
+    ``(None, None)`` (or ``(None, None, None)`` with feed). A valid key whose
+    broker session is revoked or missing returns ``(None, <broker>)`` when the
+    broker name is known, so callers can tell the two apart.
     """
     refused = (None, None, None) if include_feed_token else (None, None)
 
@@ -1585,6 +1604,13 @@ def get_auth_token_broker(provided_api_key, include_feed_token=False):
         return result, result[0], result[-1], None
 
     return _read_coherently(read, refused)
+
+
+def _revoked_or_missing_session(include_feed_token, broker_name):
+    """Token-less result that still names the broker when known."""
+    if include_feed_token:
+        return (None, None, broker_name)
+    return (None, broker_name)
 
 
 def _auth_token_broker(provided_api_key, include_feed_token=False):
@@ -1621,7 +1647,15 @@ def _auth_token_broker(provided_api_key, include_feed_token=False):
                     # Token was revoked, remove from cache
                     auth_cache.pop(cache_key, None)
                     logger.warning(f"Cached auth token was revoked for user_id '{user_id}'.")
-                    return (None, None, None) if include_feed_token else (None, None)
+                    return _revoked_or_missing_session(include_feed_token, auth_obj.broker)
+                # A prior negative cache for a revoked session: keep the broker
+                # name so callers can distinguish it from an unknown API key.
+                if (
+                    isinstance(cached_result, tuple)
+                    and cached_result
+                    and cached_result[0] is None
+                ):
+                    return cached_result
                 # Not revoked, return cached result
                 logger.debug(f"Auth token retrieved from cache for user_id: {user_id}")
                 return cached_result
@@ -1657,8 +1691,11 @@ def _auth_token_broker(provided_api_key, include_feed_token=False):
                 return result
             else:
                 # Cache the negative result to prevent repeated DB queries and log spam
-                # (e.g., orphaned users with revoked sessions polled by background services)
-                negative_result = (None, None, None) if include_feed_token else (None, None)
+                # (e.g., orphaned users with revoked sessions polled by background services).
+                # Keep the broker name when known so the API can say "log in again"
+                # instead of "Invalid openalgo apikey".
+                broker_name = auth_obj.broker if auth_obj else None
+                negative_result = _revoked_or_missing_session(include_feed_token, broker_name)
                 _fill(auth_cache, cache_key, negative_result, generation)
                 logger.warning(f"No valid auth token or broker found for user_id '{user_id}'. Cached negative result.")
                 return negative_result

@@ -880,6 +880,14 @@ def start_strategy_process(strategy_id):
             strategy_env["OPENALGO_STRATEGY_EXCHANGE"] = normalize_exchange(config.get("exchange"))
             strategy_env.setdefault("OPENALGO_HOST", "http://127.0.0.1:5000")
             try:
+                from utils.broker_context import current_broker
+
+                _broker = current_broker()
+                if _broker:
+                    strategy_env["OPENALGO_BROKER"] = _broker
+            except Exception as e:
+                logger.warning(f"Could not inject broker for strategy {strategy_id}: {e}")
+            try:
                 from database.auth_db import get_api_key_for_tradingview
 
                 user_id = config.get("user_id")
