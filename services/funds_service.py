@@ -1,7 +1,7 @@
 import importlib
 from typing import Any
 
-from database.auth_db import get_auth_token_broker
+from database.auth_db import api_key_auth_error_message, get_auth_token_broker
 from services.broker_busy import BrokerBusyError, broker_busy_result
 from utils.logging import get_logger
 
@@ -104,7 +104,14 @@ def get_funds(
     if api_key and not (auth_token and broker):
         AUTH_TOKEN, broker_name = get_auth_token_broker(api_key)
         if AUTH_TOKEN is None:
-            return False, {"status": "error", "message": "Invalid openalgo apikey"}, 403
+            return (
+                False,
+                {
+                    "status": "error",
+                    "message": api_key_auth_error_message(AUTH_TOKEN, broker_name),
+                },
+                403,
+            )
         original_data = {"apikey": api_key}
         return get_funds_with_auth(AUTH_TOKEN, broker_name, original_data)
 

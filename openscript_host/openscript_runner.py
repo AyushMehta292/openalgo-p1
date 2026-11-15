@@ -2814,7 +2814,14 @@ def build_client(options):
         ) from missing
 
     host = os.getenv("OPENALGO_HOST") or os.getenv("HOST_SERVER", "http://127.0.0.1:5000")
-    return api(api_key=api_key, host=host)
+    client = api(api_key=api_key, host=host)
+    # The openalgo SDK does not take a broker argument. Without this header,
+    # /api/v1 still resolves the broker from the API key (bind_tab_broker);
+    # sending it avoids the select_broker walk when the parent already knew.
+    broker = (os.getenv("OPENALGO_BROKER") or "").strip().lower()
+    if broker:
+        client.headers["X-OpenAlgo-Broker"] = broker
+    return client
 
 
 def main(argv=None) -> int:

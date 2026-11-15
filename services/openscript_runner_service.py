@@ -832,6 +832,14 @@ def _spawn_claimed(
     environment.setdefault("OPENALGO_HOST", "http://127.0.0.1:5000")
     if api_key:
         environment["OPENALGO_API_KEY"] = api_key
+    try:
+        from utils.broker_context import current_broker
+
+        _broker = current_broker()
+        if _broker:
+            environment["OPENALGO_BROKER"] = _broker
+    except Exception:
+        logger.warning("Could not inject OPENALGO_BROKER for OpenScript run %s", run_id)
 
     # The script's parameters go through the environment rather than the command
     # line, which carries only the fields checked against a pattern above. A

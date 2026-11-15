@@ -139,9 +139,12 @@ def test_auth_token_broker_caches_negative_result():
     api_key = "revoked_user_key_333"
     auth_mod.upsert_api_key("revoked_user", api_key)
 
-    # First call — should return None and cache the negative result
+    # First call — no token, but the broker name is kept so callers can say
+    # "log in again" instead of blaming the platform API key.
     result1 = auth_mod.get_auth_token_broker(api_key)
-    assert result1 == (None, None), f"Expected (None, None) for revoked user, got {result1}"
+    assert result1 == (None, "shoonya"), (
+        f"Expected (None, 'shoonya') for revoked user, got {result1}"
+    )
 
     # Check that the negative result was cached in auth_cache
     cache_key = f"{hashlib.sha256(api_key.encode()).hexdigest()}_False"
@@ -149,8 +152,8 @@ def test_auth_token_broker_caches_negative_result():
         "Negative result was NOT cached in auth_cache. This causes log spam "
         "because every subsequent call hits the DB and logs a warning."
     )
-    assert auth_mod.auth_cache[cache_key] == (None, None), (
-        f"Expected cached (None, None), got {auth_mod.auth_cache[cache_key]}"
+    assert auth_mod.auth_cache[cache_key] == (None, "shoonya"), (
+        f"Expected cached (None, 'shoonya'), got {auth_mod.auth_cache[cache_key]}"
     )
 
     print("PASS: get_auth_token_broker() caches negative result for revoked users")

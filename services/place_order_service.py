@@ -2,7 +2,7 @@ import copy
 import importlib
 from typing import Any, Dict, Optional, Tuple
 
-from database.auth_db import get_auth_token_broker
+from database.auth_db import api_key_auth_error_message, get_auth_token_broker
 from database.settings_db import get_analyze_mode
 from events import AnalyzerErrorEvent, OrderFailedEvent, OrderPlacedEvent
 from restx_api.schemas import OrderSchema
@@ -377,7 +377,10 @@ def place_order(
     if api_key and not (auth_token and broker):
         AUTH_TOKEN, broker_name = get_auth_token_broker(api_key)
         if AUTH_TOKEN is None:
-            error_response = {"status": "error", "message": "Invalid openalgo apikey"}
+            error_response = {
+                "status": "error",
+                "message": api_key_auth_error_message(AUTH_TOKEN, broker_name),
+            }
             # Skip logging for invalid API keys to prevent database flooding
             return False, error_response, 403
 
