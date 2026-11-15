@@ -130,17 +130,20 @@ def test_the_atexit_cleanup_after_a_gthread_shutdown_keeps_the_record(host, monk
     assert _next_server_start(monkeypatch) == ["s1"]
 
 
-def test_without_a_gthread_shutdown_atexit_still_records_the_stop(host, monkeypatch):
-    """The development server reaches atexit: unchanged, the stop is recorded."""
+def test_a_clean_shutdown_on_the_development_server_is_not_a_stop(host, monkeypatch):
+    """A clean exit keeps the running record. The next process resumes the child.
+
+    Pressing Stop is the path that records the strategy as stopped. Reaching
+    atexit, which the development server does, is not that path.
+    """
     tmp_path, children = host
     child = _running_strategy(tmp_path, children)
 
     ps.cleanup_on_exit()
 
     assert _wait_dead(child)
-    assert ps.STRATEGY_CONFIGS["s1"]["is_running"] is False
-    assert ps.STRATEGY_CONFIGS["s1"]["pid"] is None
-    assert _next_server_start(monkeypatch) == []
+    assert ps.STRATEGY_CONFIGS["s1"]["is_running"] is True
+    assert _next_server_start(monkeypatch) == ["s1"]
 
 
 def test_a_trader_stop_still_records_the_stop(host):

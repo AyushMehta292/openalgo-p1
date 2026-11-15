@@ -62,14 +62,14 @@ def test_chartink_restores_nothing_and_schedulers_keep_their_defaults():
             from blueprints import chartink
             from blueprints import python_strategy as ps
 
-            # Nothing booked at import, and the scheduler has APScheduler's own
-            # one second misfire grace, as on main.
-            assert chartink.scheduler.get_job(chartink._SQUAREOFF_RESTORE_JOB_ID) is None
+            # The restore is booked on every host. Misfire grace stays one second,
+            # so a square-off that is already late is not fired as an order.
+            # A clean shutdown is not Stop: the next future square-off is armed.
+            assert chartink.scheduler.get_job(chartink._SQUAREOFF_RESTORE_JOB_ID) is not None
             assert chartink.scheduler._job_defaults["misfire_grace_time"] == 1
             ps.init_scheduler()
             assert ps.SCHEDULER._job_defaults["misfire_grace_time"] == 1
 
-            # Even called directly, the restore reads nothing and books nothing.
             reads = []
 
             class Query:
@@ -81,11 +81,12 @@ def test_chartink_restores_nothing_and_schedulers_keep_their_defaults():
 
             chartink.ChartinkStrategy = SimpleNamespace(query=Query)
             assert chartink.restore_squareoff_jobs() is True
+            assert reads == [1]
+            assert chartink.scheduler.get_job("squareoff_1") is None
             chartink._restore_squareoff_on_activation(
                 SimpleNamespace(id=1, is_intraday=True, squareoff_time="15:10", is_active=True)
             )
-            assert reads == []
-            assert chartink.scheduler.get_job("squareoff_1") is None
+            assert chartink.scheduler.get_job("squareoff_1") is not None
             print("PASSED")
             """
         )
