@@ -578,7 +578,7 @@ def run_scheduled_start(strategy_id: int) -> None:
         remove_all_scoped_sessions()
 
 
-def run_scheduled_stop(strategy_id: int) -> None:
+def run_scheduled_stop(strategy_id: int, *, from_confirm: bool = False) -> None:
     """Square a strategy off on its schedule.
 
     Deliberately not gated on ``scheduler.enabled``: this is the safety half of
@@ -596,6 +596,24 @@ def run_scheduled_stop(strategy_id: int) -> None:
             return
         run_id = int(row.current_run_id)
         user_id = str(row.user_id)
+
+        schedule = row.scheduler if isinstance(getattr(row, "scheduler", None), dict) else {}
+        stop_at = schedule.get("auto_stop_time") or getattr(row, "exit_time", None)
+        if stop_at and not from_confirm:
+            from services.downtime_resume import clock_stop_blocked
+
+            if clock_stop_blocked(
+                f"strategy-module:{strategy_id}",
+                str(stop_at),
+                source="strategy_module",
+                days=schedule.get("days"),
+            ):
+                logger.warning(
+                    "Scheduled square-off for strategy %s fell while OpenAlgo was off; "
+                    "the close was not sent",
+                    strategy_id,
+                )
+                return
 
         from services.strategy_module import engine
 
