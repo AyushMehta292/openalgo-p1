@@ -150,6 +150,12 @@ def _install_connection_factory():
         return
 
     def connect(*args, **kwargs):
+        from utils.broker_context import retarget_sqlite_database
+
+        if args:
+            args = (retarget_sqlite_database(args[0]),) + args[1:]
+        elif "database" in kwargs:
+            kwargs["database"] = retarget_sqlite_database(kwargs["database"])
         kwargs.setdefault("factory", _CooperativeConnection)
         return original(*args, **kwargs)
 
@@ -159,6 +165,11 @@ def _install_connection_factory():
 
 
 _install_connection_factory()
+
+# Job ids and job threads pick up the broker that was current when the job was added.
+from utils.broker_context import install_scheduler_scope
+
+install_scheduler_scope()
 
 
 @event.listens_for(Engine, "connect")
