@@ -208,6 +208,29 @@ def _invalidate(cache, key) -> bool:
         invalidate(key)
     return held
 
+
+def _api_key_digest(provided_api_key: str) -> str:
+    """SHA256 hex digest of a platform API key (never store the plaintext)."""
+    import hashlib
+
+    return hashlib.sha256(provided_api_key.encode()).hexdigest()
+
+
+def _broker_scoped_api_key_cache_key(provided_api_key: str, *parts) -> str:
+    """Cache key for API-key lookups, scoped to the current broker.
+
+    The same OpenAlgo platform API key string is stored in every broker
+    database. A process-wide cache keyed only by the key hash would return
+    whichever broker filled it first to every later request, and
+    ``_read_coherently`` then refuses the mismatched session as an invalid
+    key. Include ``current_broker()`` so each broker keeps its own entry.
+    """
+    from utils.broker_context import current_broker
+
+    pieces = [current_broker() or "", _api_key_digest(provided_api_key), *map(str, parts)]
+    return "_".join(pieces)
+
+
 # Conditionally create engine based on DB type
 if DATABASE_URL and "sqlite" in DATABASE_URL:
     # SQLite: Use NullPool — each checkout creates a fresh connection.
@@ -945,7 +968,7 @@ def _store_auth(name, auth_token, broker, feed_token, user_id, revoke):
 
     # CRITICAL: Clear ENTIRE auth_cache on token update to prevent stale token issues
     # This is necessary because get_auth_token_broker() uses a different cache key format
-    # (sha256(api_key)_include_feed_token) than upsert_auth() uses (auth-{name}).
+    # (broker_sha256(api_key)_include_feed_token) than upsert_auth() uses (auth-{name}).
     # Without clearing all entries, old cached tokens from get_auth_token_broker()
     # would persist and cause 401 Unauthorized errors after re-login.
     # See GitHub issue #851 for details on this cache key mismatch bug.
@@ -1463,20 +1486,20 @@ def verify_api_key(provided_api_key):
     Security measures:
     - Only caches user_id (not sensitive data)
     - Uses SHA256 hash as cache key (never stores plaintext)
+    - Cache key includes the current broker (same key string in every broker DB)
     - Invalid keys cached for 5min (prevents brute force)
     - Valid keys cached for 1hr (balances security vs performance)
     - Cache invalidated on key regeneration
     """
-    import hashlib
-
     from flask import has_request_context, request
 
     from database.traffic_db import InvalidAPIKeyTracker
     from utils.ip_helper import get_real_ip
 
-    # Generate secure cache key (SHA256 hash of API key)
-    # Security: Never store plaintext API key in cache
-    cache_key = hashlib.sha256(provided_api_key.encode()).hexdigest()
+    # Security: Never store plaintext API key in cache. Scope by broker so
+    # the shared platform key does not leak one broker's verify result to
+    # another broker's database lookup.
+    cache_key = _broker_scoped_api_key_cache_key(provided_api_key)
 
     # Step 1: Check invalid cache first (fast rejection of known bad keys).
     # One get each, never a membership test then a subscript: the entry can
@@ -1526,7 +1549,7 @@ def verify_api_key(provided_api_key):
                 client_ip = "127.0.0.1"
 
             # Hash the API key for tracking (don't store plaintext)
-            api_key_hash = hashlib.sha256(provided_api_key.encode()).hexdigest()[:16]
+            api_key_hash = _api_key_digest(provided_api_key)[:16]
 
             # Track the invalid API key attempt
             InvalidAPIKeyTracker.track_invalid_api_key(client_ip, api_key_hash)
@@ -1547,8 +1570,9 @@ def get_username_by_apikey(provided_api_key):
 
 def get_broker_name(provided_api_key):
     """Get only the broker name for a valid API key with caching"""
+    cache_key = _broker_scoped_api_key_cache_key(provided_api_key)
     # Check if broker name is in cache
-    cached_broker = broker_cache.get(provided_api_key, MISSING)
+    cached_broker = broker_cache.get(cache_key, MISSING)
     if cached_broker is not MISSING:
         return cached_broker
 
@@ -1561,7 +1585,7 @@ def get_broker_name(provided_api_key):
             auth_obj = Auth.query.filter_by(name=user_id).first()
             if auth_obj and not auth_obj.is_revoked:
                 # Cache the broker name
-                _fill(broker_cache, provided_api_key, auth_obj.broker, generation)
+                _fill(broker_cache, cache_key, auth_obj.broker, generation)
                 return auth_obj.broker
             else:
                 logger.warning(f"No valid broker found for user_id '{user_id}'.")
@@ -1621,11 +1645,10 @@ def _auth_token_broker(provided_api_key, include_feed_token=False):
     - Always checks is_revoked status (even for cached data)
     - Cache cleared on credential changes
     - TTL based on session expiry time
+    - Cache key includes the current broker (shared platform API key)
     """
-    import hashlib
-
-    # Generate cache key
-    cache_key = f"{hashlib.sha256(provided_api_key.encode()).hexdigest()}_{include_feed_token}"
+    # Generate cache key (broker + sha256 + feed flag). Never plaintext.
+    cache_key = _broker_scoped_api_key_cache_key(provided_api_key, include_feed_token)
 
     # Check cache first (but still verify revocation status).
     #

@@ -11,7 +11,6 @@ To run inside the OpenAlgo container:
     docker exec openalgo python test_orphaned_apikey.py
 """
 
-import hashlib
 import os
 import sys
 
@@ -146,8 +145,8 @@ def test_auth_token_broker_caches_negative_result():
         f"Expected (None, 'shoonya') for revoked user, got {result1}"
     )
 
-    # Check that the negative result was cached in auth_cache
-    cache_key = f"{hashlib.sha256(api_key.encode()).hexdigest()}_False"
+    # Check that the negative result was cached in auth_cache (broker-scoped key)
+    cache_key = auth_mod._broker_scoped_api_key_cache_key(api_key, False)
     assert cache_key in auth_mod.auth_cache, (
         "Negative result was NOT cached in auth_cache. This causes log spam "
         "because every subsequent call hits the DB and logs a warning."
