@@ -221,10 +221,22 @@ def _broker_callback(broker, para=None):
             logger.warning(f"User not in session for {broker} callback, redirecting to login")
             return redirect(url_for("auth.login"))
 
-    if session.get("logged_in") and session.get("broker") == broker:
-        # Already logged in to this broker: nothing to do here. A login to
-        # another broker goes on: it is the switch the trader confirmed on
-        # Select Broker, and it needs a login started there like any other.
+    # Already logged in to *this* broker means its own DB has an unrevoked,
+    # non-empty auth token for this broker — not the shared cookie's
+    # ``logged_in`` flag. That flag is set by any broker login
+    # (utils/auth_utils.handle_auth_success), while the per-tab ``broker`` is
+    # set from this callback URL, so checking the cookie skipped Delta/Groww
+    # after Fyers and wrote no token.
+    from database.auth_db import Auth, decrypt_token
+
+    username = session.get("user")
+    auth_row = Auth.query.filter_by(name=username).first() if username else None
+    if (
+        auth_row
+        and not auth_row.is_revoked
+        and auth_row.broker == broker
+        and decrypt_token(auth_row.auth)
+    ):
         return redirect(url_for("dashboard_bp.dashboard", broker=broker))
 
     # A POST from OpenAlgo's own login form (PIN, password, TOTP) must carry

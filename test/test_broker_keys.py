@@ -2975,6 +2975,59 @@ def test_a_logged_in_browser_can_start_the_switch_it_confirmed(
     assert completed == [("fy-token", USER, "fyers")]
 
 
+def test_shared_logged_in_cookie_does_not_skip_another_brokers_callback(
+    stores, environment, completed
+):
+    """Regression: after Fyers sets the shared ``logged_in`` cookie, a Delta
+    (or Groww) callback used to match ``logged_in`` + per-tab ``broker`` from
+    the URL and redirect to the dashboard without writing a token.
+
+    ``logged_in`` is cross-broker; only this broker's own unrevoked non-empty
+    auth row may short-circuit the callback.
+    """
+    _save_fyers()
+    # This broker's row is revoked and empty — the state left after a funds
+    # check revoked the session. The shared cookie still says logged_in.
+    auth_db.db_session.add(
+        auth_db.Auth(name=USER, auth="", broker="fyers", is_revoked=True)
+    )
+    auth_db.db_session.commit()
+    app = _app()
+    app.broker_auth_functions = {"fyers_auth": lambda code: ("fy-token", None)}
+    # Mimic production: shared cookie logged_in=True, tab broker already the
+    # callback broker (bind_tab_broker sets it from /<broker>/callback).
+    client = _signed_in(
+        app, logged_in=True, login_time=datetime.now(IST).isoformat(), broker="fyers"
+    )
+    url = client.post("/auth/broker/login", json={"broker": "fyers"}).get_json()["url"]
+
+    answer = client.get(f"/fyers/callback?auth_code=c&state={_url_state(url)}")
+
+    assert answer.get_data(as_text=True) == "logged in"
+    assert completed == [("fy-token", USER, "fyers")]
+    # Must not have short-circuited to the dashboard.
+    assert answer.headers.get("Location") != "/dashboard?broker=fyers"
+
+
+def test_this_brokers_own_auth_row_still_skips_a_repeat_callback(
+    stores, environment, completed
+):
+    """A callback for a broker that already holds an unrevoked non-empty token
+    still redirects to the dashboard without exchanging again."""
+    _save_fyers()
+    _logged_in("fyers")
+    app = _app()
+    app.broker_auth_functions = {"fyers_auth": lambda code: ("should-not-run", None)}
+    client = _signed_in(
+        app, logged_in=True, login_time=datetime.now(IST).isoformat(), broker="fyers"
+    )
+
+    answer = client.get("/fyers/callback?auth_code=c")
+
+    assert answer.headers["Location"] == "/dashboard?broker=fyers"
+    assert completed == []
+
+
 def test_the_setup_guide_matches_where_each_login_goes(stores, environment, monkeypatch):
     """AUDIT R12. Shoonya and Zebu were described as a form in OpenAlgo while
     their login redirects to the broker's site. Every listed broker's login is
