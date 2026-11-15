@@ -70,6 +70,7 @@ export default function Dashboard() {
   // Broker token revoked/expired while the app session is still valid
   // (daily token rollover). Routes the user to /broker, not /login (#1400).
   const [brokerExpired, setBrokerExpired] = useState(false)
+  const [brokerLoginRequired, setBrokerLoginRequired] = useState(false)
 
   // Fetch dashboard funds data
   const fetchFundsData = useCallback(async () => {
@@ -81,7 +82,9 @@ export default function Dashboard() {
 
       if (response.status === 401) {
         const body = await response.json().catch(() => null)
-        if (body?.code === 'BROKER_SESSION_EXPIRED') {
+        if (body?.code === 'BROKER_LOGIN_REQUIRED') {
+          setBrokerLoginRequired(true)
+        } else if (body?.code === 'BROKER_SESSION_EXPIRED') {
           setBrokerExpired(true)
         } else {
           setIsAuthenticated(false)
@@ -270,6 +273,23 @@ export default function Dashboard() {
 
   // Broker token expired but the app session is fine: send the user to the
   // broker reconnect flow, not /login (which would bounce back) — #1400.
+  if (brokerLoginRequired) {
+    return (
+      <div className="flex flex-col items-center justify-center min-h-[50vh] space-y-4">
+        <h1 className="text-2xl font-bold">Log in to this broker</h1>
+        <p className="text-muted-foreground">
+          Saved API keys are not a session. Log in to open this broker.
+        </p>
+        <Link
+          to="/broker"
+          className="inline-flex items-center rounded-md bg-primary px-4 py-2 text-sm font-medium text-primary-foreground hover:bg-primary/90"
+        >
+          Log in
+        </Link>
+      </div>
+    )
+  }
+
   if (brokerExpired) {
     return (
       <div className="flex flex-col items-center justify-center min-h-[50vh] space-y-4">
