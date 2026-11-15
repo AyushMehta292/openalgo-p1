@@ -1701,11 +1701,31 @@ def _start_unless_stopped_by_trader(strategy_id: str):
         return start_strategy_process(strategy_id)
 
 
-def scheduled_stop_strategy(strategy_id: str):
+def scheduled_stop_strategy(strategy_id: str, *, from_confirm: bool = False):
     """
     Wrapper function for scheduled strategy stop.
     Always stops the strategy regardless of market status (for safety).
+
+    A stop whose clock time fell while the process was down is a warning.
+    The child is not killed for that missed time, and the script is not
+    flattened from its text. The next future fire still belongs to the scheduler.
     """
+    config = STRATEGY_CONFIGS.get(strategy_id) or {}
+    stop_at = config.get("schedule_stop")
+    if stop_at and not from_confirm:
+        from services.downtime_resume import clock_stop_blocked
+
+        if clock_stop_blocked(
+            f"python:{strategy_id}",
+            str(stop_at),
+            source="python",
+            days=config.get("schedule_days"),
+        ):
+            logger.warning(
+                "Scheduled stop for %s fell while OpenAlgo was off; the strategy was not stopped",
+                strategy_id,
+            )
+            return
     # Always stop - this is a safety measure to prevent strategies from running after hours
     logger.info(f"Scheduled stop triggered for strategy {strategy_id}")
     stop_strategy_process(strategy_id)
@@ -3524,15 +3544,20 @@ def cleanup_on_exit():
     with PROCESS_LOCK:
         _SHUTTING_DOWN.set()
         strategy_ids = list(RUNNING_STRATEGIES.keys())
-    keep_record = _SHUTDOWN_KEEPS_RECORDS.is_set()
+    # A clean shutdown is not the trader pressing Stop. The saved record stays
+    # "running" so the next process resumes the child. Stop is the only path
+    # that clears it.
     for strategy_id in strategy_ids:
         try:
-            if keep_record:
-                stop_strategy_process(strategy_id, keep_record=True)
-            else:
-                stop_strategy_process(strategy_id)
+            stop_strategy_process(strategy_id, keep_record=True)
         except Exception:
             pass
+    try:
+        from services.downtime_resume import touch_all_heartbeats
+
+        touch_all_heartbeats()
+    except Exception:
+        logger.exception("Could not record the shutdown heartbeat")
     logger.info("Cleanup complete")
 
 
@@ -3603,6 +3628,12 @@ def begin_shutdown(budget_s: float = _SHUTDOWN_STOP_BUDGET_SECONDS) -> list[str]
                 f"Strategy {strategy_id} (PID {pid}) did not stop within the shutdown "
                 "budget and was killed"
             )
+    try:
+        from services.downtime_resume import touch_all_heartbeats
+
+        touch_all_heartbeats()
+    except Exception:
+        logger.exception("Could not record the shutdown heartbeat")
     return killed
 
 

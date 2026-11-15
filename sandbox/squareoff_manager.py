@@ -131,6 +131,8 @@ class SquareOffManager:
 
             positions_to_close = []
             if mis_positions:
+                from services.downtime_resume import clock_stop_blocked
+
                 # Check each position against its exchange's square-off time
                 for position in mis_positions:
                     exchange = position.exchange
@@ -138,6 +140,15 @@ class SquareOffManager:
 
                     if not square_off_time:
                         logger.warning(f"No square-off time configured for exchange {exchange}")
+                        continue
+
+                    # A square-off that came due while the process was down is a
+                    # warning. Paper does not catch it up with a close.
+                    if clock_stop_blocked(
+                        f"sandbox:{exchange}",
+                        square_off_time.strftime("%H:%M"),
+                        source="sandbox",
+                    ):
                         continue
 
                     # Check if current time has passed square-off time
@@ -289,6 +300,23 @@ class SquareOffManager:
             logger.exception(f"Error in _cancel_open_mis_orders: {e}")
 
         return cancelled_count
+
+    def close_missed_squareoff(self, exchange: str) -> int:
+        """Close this exchange's open paper positions. Confirm asked for it.
+
+        The downtime guard is not applied: AM confirmed the close that was held.
+        """
+        from database.sandbox_db import SandboxPositions
+
+        positions = (
+            SandboxPositions.query.filter_by(product="MIS", exchange=exchange)
+            .filter(SandboxPositions.quantity != 0)
+            .all()
+        )
+        if not positions:
+            return 0
+        self._square_off_positions(positions)
+        return len(positions)
 
     def _square_off_positions(self, positions):
         """Square-off a list of positions"""

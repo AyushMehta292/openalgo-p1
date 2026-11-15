@@ -939,6 +939,16 @@ def setup_environment(app):
             # Signal that DB tables are ready (unblocks cache restoration)
             app.db_ready.set()
 
+            # Remember each broker's downtime before any scheduler can fire a
+            # stop that came due while the process was down.
+            try:
+                from services.downtime_resume import open_gap
+                from utils.broker_context import run_for_each_broker
+
+                run_for_each_broker(open_gap)
+            except Exception:
+                logger.exception("Could not open the downtime gap")
+
             # Ask each broker about the token already stored. A restart after
             # 03:00 must not wait for a browser request, and a failure to reach
             # the broker leaves the token in place.
@@ -1086,6 +1096,16 @@ def setup_environment(app):
                 run_for_each_broker(_start_sandbox_when_paper)
             except Exception as e:
                 logger.error(f"Error checking analyzer mode on startup: {e}")
+
+            # Resume every broker, then warn for an exit that was missed while
+            # the process was down. The warning does not send that order.
+            try:
+                from services.downtime_resume import resume_for_each_broker
+
+                resume_for_each_broker()
+                logger.debug("Downtime resume checked")
+            except Exception:
+                logger.exception("Downtime resume failed")
 
             # Auto-start Telegram bot if it was active (after DB tables exist).
             # initialize_bot_sync is the one entry point: which validation path

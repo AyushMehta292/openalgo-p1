@@ -555,7 +555,10 @@ def get_market_hours_config(workflow) -> dict:
 
 
 def execute_workflow_scheduled(
-    workflow_id: int, api_key: str = None, market_hours_only: bool = False
+    workflow_id: int,
+    api_key: str = None,
+    market_hours_only: bool = False,
+    from_confirm: bool = False,
 ):
     """Execute a workflow from scheduler (synchronous).
 
@@ -563,7 +566,15 @@ def execute_workflow_scheduled(
     the key in the jobstore, still run. New jobs pass None and the current key
     is decrypted from the workflow row on every run.
     """
+    from services.downtime_resume import consume_clock_suppression
     from services.flow_executor_service import execute_workflow
+
+    if not from_confirm and consume_clock_suppression(f"flow:{workflow_id}"):
+        logger.warning(
+            "Scheduled flow %s fell while OpenAlgo was off; it was not run",
+            workflow_id,
+        )
+        return
 
     logger.info(f"Scheduled execution of workflow {workflow_id}")
 

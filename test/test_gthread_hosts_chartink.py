@@ -215,14 +215,16 @@ def test_turning_a_strategy_back_on_restores_its_squareoff(restore):
     assert (job.hour, job.minute, job.args) == (14, 5, [2])
 
 
-def test_nothing_is_restored_outside_gthread(restore, monkeypatch):
+def test_a_clean_shutdown_restores_the_next_squareoff_on_every_host(restore, monkeypatch):
+    """Resume is not limited to the gthread worker. The next future fire is armed."""
     scheduler, reads = restore
     monkeypatch.setattr(chartink.runtime, "gthread_active", lambda: False)
 
     assert chartink.restore_squareoff_jobs() is True
-    chartink._restore_squareoff_on_activation(_strategy(1))
+    chartink._restore_squareoff_on_activation(_strategy(2, squareoff="14:05", active=True))
 
-    assert scheduler.jobs == {} and reads == []
+    assert reads == [1]
+    assert sorted(scheduler.jobs) == ["squareoff_1", "squareoff_2"]
 
 
 def test_a_job_created_since_startup_is_left_alone(restore):
@@ -295,7 +297,7 @@ def test_the_first_chartink_request_restores_when_the_scheduled_attempt_has_not(
     assert "squareoff_1" in scheduler.jobs
 
 
-def test_startup_books_no_restore_outside_gthread():
-    """This process is the development server: nothing is booked at import."""
+def test_startup_books_the_squareoff_restore_on_the_development_server():
+    """A clean shutdown is not Stop, so the development server arms the restore too."""
     assert not chartink.runtime.gthread_active()
-    assert chartink.scheduler.get_job(chartink._SQUAREOFF_RESTORE_JOB_ID) is None
+    assert chartink.scheduler.get_job(chartink._SQUAREOFF_RESTORE_JOB_ID) is not None

@@ -568,7 +568,7 @@ def _scheduled_start(filename):
 
 
 @releases_scoped_sessions
-def _scheduled_stop(filename):
+def _scheduled_stop(filename, *, from_confirm: bool = False):
     """Stop one script because its schedule said so.
 
     Always attempted, whatever the calendar says and whether or not the script
@@ -576,6 +576,23 @@ def _scheduled_stop(filename):
     watching it, and stopping something that is already stopped costs nothing.
     """
     try:
+        entry = (_load_schedules() or {}).get(filename) or {}
+        stop_at = entry.get("stop_time") if isinstance(entry, dict) else None
+        if stop_at and not from_confirm:
+            from services.downtime_resume import clock_stop_blocked
+
+            if clock_stop_blocked(
+                f"openscript:{filename}",
+                str(stop_at),
+                source="openscript",
+                days=entry.get("days"),
+            ):
+                logger.warning(
+                    "Scheduled stop for %s fell while OpenAlgo was off; the script was not stopped "
+                    "and no exit was guessed from it",
+                    filename,
+                )
+                return
         ok, message = stop_run(filename)
         if ok:
             logger.info("Stopped %s on schedule: %s", filename, message)
