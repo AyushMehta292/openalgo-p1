@@ -8,6 +8,7 @@ import os
 from pathlib import Path
 
 from flask import Blueprint, abort, request, send_file, send_from_directory
+from utils.profile import is_cloud_profile
 
 react_bp = Blueprint("react", __name__)
 
@@ -244,6 +245,23 @@ npm run build</pre>
 
 
 # Index/Home route
+
+def _cloud_disabled(feature: str):
+    """503 when OPENALGO_PROFILE=cloud disables Historify / backtest pages."""
+    from flask import jsonify
+    if is_cloud_profile():
+        return (
+            jsonify(
+                {
+                    "status": "error",
+                    "message": f"{feature} is disabled on this cloud install (OPENALGO_PROFILE=cloud).",
+                }
+            ),
+            503,
+        )
+    return None
+
+
 @react_bp.route("/")
 def react_index():
     return serve_react_app()
@@ -406,12 +424,18 @@ def react_tradingview():
 # Portfolio Backtester
 @react_bp.route("/portfolio-backtester")
 def react_portfolio_backtester():
+    disabled = _cloud_disabled("Portfolio Backtester")
+    if disabled is not None:
+        return disabled
     return serve_react_app()
 
 
 # SIP Backtester
 @react_bp.route("/sip-backtester")
 def react_sip_backtester():
+    disabled = _cloud_disabled("SIP Backtester")
+    if disabled is not None:
+        return disabled
     return serve_react_app()
 
 
@@ -587,12 +611,18 @@ def react_tools_strategy_portfolio_legacy():
 # Portfolio Backtester results
 @react_bp.route("/portfolio-backtester/results", strict_slashes=False)
 def react_portfolio_backtester_results():
+    disabled = _cloud_disabled("Portfolio Backtester")
+    if disabled is not None:
+        return disabled
     return serve_react_app()
 
 
 # SIP Backtester results
 @react_bp.route("/sip-backtester/results", strict_slashes=False)
 def react_sip_backtester_results():
+    disabled = _cloud_disabled("SIP Backtester")
+    if disabled is not None:
+        return disabled
     return serve_react_app()
 
 
@@ -893,18 +923,27 @@ def react_action_center():
 # Historify (Historical Data Management)
 @react_bp.route("/historify", strict_slashes=False)
 def react_historify():
+    disabled = _cloud_disabled("Historify")
+    if disabled is not None:
+        return disabled
     return serve_react_app()
 
 
 # Historify Charts
 @react_bp.route("/historify/charts", strict_slashes=False)
 def react_historify_charts():
+    disabled = _cloud_disabled("Historify")
+    if disabled is not None:
+        return disabled
     return serve_react_app()
 
 
 # String, not path: the React ":symbol" segment does not match slashes.
 @react_bp.route("/historify/charts/<symbol>", strict_slashes=False)
 def react_historify_charts_symbol(symbol):
+    disabled = _cloud_disabled("Historify")
+    if disabled is not None:
+        return disabled
     return serve_react_app()
 
 
