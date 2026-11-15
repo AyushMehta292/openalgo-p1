@@ -181,6 +181,7 @@ class ScalpingRiskMonitor:
         # request_sync() schedules it on a single daemon worker and coalesces repeats.
         self._sync_lock = threading.Lock()
         self._sync_pending = False
+        self._sync_broker: str | None = None
         self._sync_thread: threading.Thread | None = None
         atexit.register(self.stop)
 
@@ -194,9 +195,19 @@ class ScalpingRiskMonitor:
 
         Coalesces bursts: if a sync is already running, just flag that another is
         needed so it re-runs once. Safe to call from request threads.
+
+        Does nothing until the caller has entered a broker context. The worker
+        is a new thread, and a new thread does not keep that context, so the
+        broker is carried across and entered again before the database is opened.
         """
+        from utils.broker_context import BROKERS, current_broker
+
+        broker = current_broker()
+        if broker not in BROKERS:
+            return
         with self._sync_lock:
             self._sync_pending = True
+            self._sync_broker = broker
             if self._sync_thread is not None and self._sync_thread.is_alive():
                 return
             self._sync_thread = threading.Thread(
@@ -205,14 +216,20 @@ class ScalpingRiskMonitor:
             self._sync_thread.start()
 
     def _sync_worker(self) -> None:
+        from utils.broker_context import BROKERS, broker_context
+
         while True:
             with self._sync_lock:
                 if not self._sync_pending:
                     self._sync_thread = None
                     return
                 self._sync_pending = False
+                broker = self._sync_broker
+            if broker not in BROKERS:
+                continue
             try:
-                self.sync()
+                with broker_context(broker):
+                    self.sync()
             except Exception as e:
                 logger.exception("Scalping risk monitor sync error: %s", e)
 

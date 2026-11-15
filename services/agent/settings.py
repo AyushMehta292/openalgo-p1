@@ -1954,8 +1954,13 @@ def voice_enabled(*, fresh: bool = False) -> bool:
     Returns:
         True when voice is enabled. A settings read that fails returns False,
         which keeps the header closed rather than opening a capability because
-        a query errored.
+        a query errored. With no broker selected there is no settings database
+        to read, so this returns False without querying.
     """
+    from utils.broker_context import BROKERS, current_broker
+
+    if current_broker() not in BROKERS:
+        return False
     try:
         values = _load_all(fresh=fresh)
         return bool(
