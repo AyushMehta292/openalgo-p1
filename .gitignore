@@ -163,3 +163,8 @@ keys/*
 *.pem
 *.key
 .pytest_cache/
+
+# Local secrets and credentials (never commit)
+openalgo-secrets.txt
+*secrets*.txt
+openalgo-p1-*.json
