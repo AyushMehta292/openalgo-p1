@@ -1104,6 +1104,49 @@ def debug_smtp():
 HEARTBEAT_THROTTLE_SECONDS = 30
 
 
+def _stored_broker_session(username, broker):
+    """This tab's stored broker token: missing, revoked, or present.
+
+    Saved API keys are not a session. No row for this broker means the trader
+    has not logged in here, which is not a daily token expiry. ``revoked`` is
+    a token that was stored and then rejected or signed out.
+    """
+    from database.auth_db import Auth, db_session, decrypt_token
+    from utils.broker_context import BROKERS, broker_context, current_broker
+
+    def _read():
+        try:
+            row = Auth.query.filter_by(name=username).first()
+            if row is None or not (row.auth or "").strip():
+                return "missing", None
+            if broker and row.broker and row.broker != broker:
+                return "missing", None
+            if row.is_revoked:
+                return "revoked", None
+            return "present", decrypt_token(row.auth)
+        finally:
+            db_session.remove()
+
+    if broker in BROKERS and current_broker() != broker:
+        with broker_context(broker):
+            return _read()
+    return _read()
+
+
+def _broker_rejected_token(response, status_code) -> bool:
+    """True when a funds call says the stored token itself was refused."""
+    if status_code in (401, 403):
+        return True
+    message = ""
+    if isinstance(response, dict):
+        message = str(response.get("message") or "")
+    text = message.lower()
+    return any(
+        phrase in text
+        for phrase in ("token expired", "invalid token", "session expired", "unauthorized")
+    )
+
+
 def _touch_session_heartbeat():
     """Refresh last_seen for this device's active session (throttled).
 
@@ -1146,25 +1189,29 @@ def get_session_status():
     if session.get("logged_in"):
         _touch_session_heartbeat()
 
-    # If session claims to be logged in with broker, validate the auth token exists
-    if session.get("logged_in") and session.get("broker"):
-        from database.auth_db import get_api_key_for_tradingview, get_auth_token
+    # If this tab names a broker, a missing token is "log in", not an expiry.
+    # Expiry is only a stored token that was revoked or rejected.
+    if session.get("broker"):
+        from database.auth_db import get_api_key_for_tradingview
 
-        auth_token = get_auth_token(session.get("user"))
-        if auth_token is None:
-            # The BROKER token is gone (daily rollover / revocation) but the
-            # APP session is still valid. Do NOT clear or downgrade the
-            # session here: `logged_in` doubles as the app-session flag in
-            # utils/session.is_session_valid(), so popping it makes every
-            # @check_session_validity route (including /auth/dashboard-data)
-            # hard-logout the user before the reconnect UI can render
-            # (issue #1400). Keep the session intact and just flag the state;
-            # /auth/dashboard-data returns BROKER_SESSION_EXPIRED and the
-            # dashboard renders the Reconnect Broker action, while
-            # /auth/broker admits the user for re-authentication.
+        state, _token = _stored_broker_session(session.get("user"), session.get("broker"))
+        if state == "missing":
+            # The app sign-in stays. This tab's broker has no stored token, so
+            # the dashboard shows Log in. Saved keys are not that token.
+            return jsonify(
+                {
+                    "status": "success",
+                    "authenticated": True,
+                    "logged_in": bool(session.get("logged_in")),
+                    "user": session.get("user"),
+                    "broker": session.get("broker"),
+                    "broker_login_required": True,
+                }
+            ), 200
+        if state == "revoked":
             logger.info(
-                f"Session status: broker token invalid for user {session.get('user')} - "
-                "broker reconnect required"
+                f"Session status: stored {session.get('broker')} token was revoked for "
+                f"user {session.get('user')}"
             )
             return jsonify(
                 {
@@ -1177,7 +1224,6 @@ def get_session_status():
                 }
             ), 200
 
-        # Get API key for the user
         api_key = get_api_key_for_tradingview(session.get("user"))
 
         # Include active session count
@@ -1310,38 +1356,36 @@ def get_dashboard_data():
     if "user" not in session:
         return jsonify({"status": "error", "message": "Not authenticated"}), 401
 
-    if not session.get("logged_in"):
-        # App session valid, broker not connected (fresh login or downgraded
-        # by session-status after a token rollover) -- the right CTA is the
-        # broker reconnect flow, not /login (issue #1400).
-        return jsonify(
-            {
-                "status": "error",
-                "code": "BROKER_SESSION_EXPIRED",
-                "message": "Broker not connected - please connect your broker",
-            }
-        ), 401
-
     login_username = session["user"]
     broker = session.get("broker")
 
     if not broker:
-        return jsonify({"status": "error", "message": "Broker not set in session"}), 400
+        return jsonify(
+            {
+                "status": "error",
+                "code": "BROKER_LOGIN_REQUIRED",
+                "message": "Log in to a broker to open its dashboard.",
+            }
+        ), 401
 
     try:
-        from database.auth_db import get_api_key_for_tradingview, get_auth_token
         from database.settings_db import get_analyze_mode
         from services.funds_service import get_funds
         from utils.broker_context import BROKERS, broker_context, current_broker
 
-        AUTH_TOKEN = get_auth_token(login_username)
-
-        if AUTH_TOKEN is None:
-            # The APP session is still valid -- it is the BROKER token that is
-            # revoked/expired. The machine-readable code lets the dashboard
-            # point the user at /broker (reconnect) instead of /login, which
-            # would just bounce them back (issue #1400).
-            logger.warning(f"No auth token found for user {login_username}")
+        # Read this broker's own row. A token cached for another broker is not
+        # this tab's session, and its absence is not an expiry.
+        state, AUTH_TOKEN = _stored_broker_session(login_username, broker)
+        if state == "missing":
+            return jsonify(
+                {
+                    "status": "error",
+                    "code": "BROKER_LOGIN_REQUIRED",
+                    "message": "Log in to this broker to open its dashboard.",
+                }
+            ), 401
+        if state == "revoked" or not AUTH_TOKEN:
+            logger.warning(f"Stored {broker} token was rejected for user {login_username}")
             return jsonify(
                 {
                     "status": "error",
@@ -1367,6 +1411,18 @@ def get_dashboard_data():
                 return jsonify({"status": "success", "data": funds})
             success, response, status_code = get_funds(auth_token=AUTH_TOKEN, broker=broker)
             if not success:
+                if _broker_rejected_token(response, status_code):
+                    logger.warning(f"{broker} rejected the stored token")
+                    return (
+                        jsonify(
+                            {
+                                "status": "error",
+                                "code": "BROKER_SESSION_EXPIRED",
+                                "message": "Broker session expired - please reconnect your broker",
+                            }
+                        ),
+                        401,
+                    )
                 logger.error(
                     f"Failed to get funds data: {response.get('message', 'Unknown error')}"
                 )
