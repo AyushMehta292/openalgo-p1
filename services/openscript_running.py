@@ -51,7 +51,9 @@ IST = pytz.timezone("Asia/Kolkata")
 #: Beside the run settings and the schedules, for the same reason: a container
 #: keeps this folder on a named volume, so what a trader started outlives an
 #: upgrade.
-STATE_FILE = Path("strategies") / "openscript_running.json"
+from utils.broker_context import BrokerPath
+
+STATE_FILE = BrokerPath("openscript_running")
 
 # The same lock shape the run settings use, and for the same reason: a write is
 # a read, a change and a rename, and two interleaved would lose one script's

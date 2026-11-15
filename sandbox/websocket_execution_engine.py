@@ -35,6 +35,9 @@ class WebSocketExecutionEngine:
     """
 
     def __init__(self):
+        from utils.broker_context import current_broker
+
+        self.broker = current_broker()
         self.market_data_service = get_market_data_service()
         self._subscriber_id: str | None = None
         self._running = False
@@ -87,6 +90,15 @@ class WebSocketExecutionEngine:
 
         self._execution_engine = ExecutionEngine()
 
+    def _in_broker(self, fn, *args, **kwargs):
+        """Run ``fn`` against this engine's broker database."""
+        from utils.broker_context import broker_context
+
+        if not self.broker:
+            return fn(*args, **kwargs)
+        with broker_context(self.broker):
+            return fn(*args, **kwargs)
+
     def start(self):
         """Start the WebSocket execution engine"""
         if self._running:
@@ -96,8 +108,8 @@ class WebSocketExecutionEngine:
         logger.debug("Starting WebSocket execution engine")
         self._running = True
 
-        # Build initial order index from database
-        self._rebuild_order_index()
+        # Build initial order index from this broker's sandbox database.
+        self._in_broker(self._rebuild_order_index)
 
         # Subscribe to MarketDataService with CRITICAL priority for immediate processing
         try:
@@ -604,12 +616,12 @@ class WebSocketExecutionEngine:
             from database.sandbox_db import get_config
             from sandbox.execution_engine import run_execution_engine_once
 
-            check_interval = int(get_config("order_check_interval", "5"))
+            check_interval = int(self._in_broker(get_config, "order_check_interval", "5"))
             logger.debug(f"Fallback polling started with {check_interval}s interval")
 
             while self._fallback_running and self._running:
                 try:
-                    run_execution_engine_once()
+                    self._in_broker(run_execution_engine_once)
                 except Exception as e:
                     logger.exception(f"Error in fallback polling: {e}")
 

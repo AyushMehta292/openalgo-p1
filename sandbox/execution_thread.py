@@ -26,29 +26,42 @@ _thread_lock = threading.Lock()
 _stop_event = threading.Event()
 _current_engine_type = None  # Track which engine type is running
 _gtt_maintenance_thread = None
+_gtt_threads = {}
+_execution_threads = {}
 _auto_upgrade_thread = None
 _auto_upgrade_stop_event = threading.Event()
 _auto_upgrade_enabled = False
 
 
 class ExecutionEngineThread(threading.Thread):
-    """Daemon thread that runs the execution engine"""
+    """Daemon thread that runs the execution engine for one broker."""
 
-    def __init__(self):
-        super().__init__(daemon=True, name="SandboxExecutionEngine")
+    def __init__(self, broker=None):
+        from utils.broker_context import current_broker
+
+        self.broker = broker or current_broker()
+        super().__init__(daemon=True, name=f"SandboxExecution-{self.broker or 'default'}")
         self.stop_event = threading.Event()
         self.check_interval = int(get_config("order_check_interval", "5"))
 
     def run(self):
         """Main thread loop"""
         from sandbox.execution_engine import ExecutionEngine
+        from utils.broker_context import broker_context
 
         logger.debug("Sandbox Execution Engine thread started")
         engine = ExecutionEngine()
 
+        def _tick():
+            engine.check_and_execute_pending_orders()
+
         while not self.stop_event.is_set():
             try:
-                engine.check_and_execute_pending_orders()
+                if self.broker:
+                    with broker_context(self.broker):
+                        _tick()
+                else:
+                    _tick()
             except Exception as e:
                 logger.exception(f"Error in execution engine thread: {e}")
 
@@ -86,11 +99,16 @@ class GTTMaintenanceThread(threading.Thread):
     #: Expiry is a wall-clock event with a day's granularity; hourly is ample.
     EXPIRY_INTERVAL_SEC = 3600
 
-    def __init__(self):
-        super().__init__(daemon=True, name="SandboxGTTMaintenance")
+    def __init__(self, broker=None):
+        from utils.broker_context import current_broker
+
+        self.broker = broker or current_broker()
+        super().__init__(daemon=True, name=f"SandboxGTT-{self.broker or 'default'}")
         self.stop_event = threading.Event()
 
     def run(self):
+        from utils.broker_context import broker_context
+
         logger.debug("Sandbox GTT maintenance thread started")
         seconds_since_expiry_sweep = 0
 
@@ -103,14 +121,21 @@ class GTTMaintenanceThread(threading.Thread):
             try:
                 from sandbox import gtt_manager
 
-                gtt_manager.reclaim_stranded_legs()
+                def _sweep():
+                    nonlocal seconds_since_expiry_sweep
+                    gtt_manager.reclaim_stranded_legs()
+                    seconds_since_expiry_sweep += self.RECLAIM_INTERVAL_SEC
+                    if seconds_since_expiry_sweep >= self.EXPIRY_INTERVAL_SEC:
+                        seconds_since_expiry_sweep = 0
+                        expired = gtt_manager.expire_due_gtts()
+                        if expired:
+                            logger.info(f"Expired {expired} GTT(s) past their expiry")
 
-                seconds_since_expiry_sweep += self.RECLAIM_INTERVAL_SEC
-                if seconds_since_expiry_sweep >= self.EXPIRY_INTERVAL_SEC:
-                    seconds_since_expiry_sweep = 0
-                    expired = gtt_manager.expire_due_gtts()
-                    if expired:
-                        logger.info(f"Expired {expired} GTT(s) past their expiry")
+                if self.broker:
+                    with broker_context(self.broker):
+                        _sweep()
+                else:
+                    _sweep()
             except Exception as e:
                 logger.exception(f"Error in GTT maintenance thread: {e}")
 
@@ -121,13 +146,19 @@ class GTTMaintenanceThread(threading.Thread):
 
 
 def _start_gtt_maintenance():
-    """Start the GTT maintenance thread if it is not already running."""
+    """Start the GTT maintenance thread for the current broker if it is not running."""
     global _gtt_maintenance_thread
+    from utils.broker_context import current_broker
 
-    if _gtt_maintenance_thread is not None and _gtt_maintenance_thread.is_alive():
+    broker = current_broker()
+    existing = _gtt_threads.get(broker) if broker else _gtt_maintenance_thread
+    if existing is not None and existing.is_alive():
         return
-    _gtt_maintenance_thread = GTTMaintenanceThread()
-    _gtt_maintenance_thread.start()
+    thread = GTTMaintenanceThread(broker)
+    thread.start()
+    if broker:
+        _gtt_threads[broker] = thread
+    _gtt_maintenance_thread = thread
 
 
 def _stop_gtt_maintenance():
@@ -194,12 +225,16 @@ def start_execution_engine(engine_type: str = None):
     global _auto_upgrade_thread, _auto_upgrade_enabled
 
     with _thread_lock:
-        # Check if any engine is already running
-        if _execution_thread is not None and _execution_thread.is_alive():
+        from utils.broker_context import current_broker
+
+        broker = current_broker()
+        running = _execution_threads.get(broker) if broker else _execution_thread
+        # Check if any engine is already running for this broker
+        if running is not None and running.is_alive():
             logger.debug("Polling execution engine already running")
             return True, "Execution engine already running (type: polling)"
 
-        if _websocket_engine is not None:
+        if not broker and _websocket_engine is not None:
             from sandbox.websocket_execution_engine import is_websocket_execution_engine_running
 
             if is_websocket_execution_engine_running():
@@ -244,8 +279,10 @@ def start_execution_engine(engine_type: str = None):
                 _auto_upgrade_enabled = True
 
             # Start polling engine (default)
-            _execution_thread = ExecutionEngineThread()
+            _execution_thread = ExecutionEngineThread(broker)
             _execution_thread.start()
+            if broker:
+                _execution_threads[broker] = _execution_thread
             _current_engine_type = "polling"
             logger.debug("Polling execution engine started successfully")
             if _auto_upgrade_enabled:

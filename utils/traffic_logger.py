@@ -19,8 +19,14 @@ _traffic_log_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="tr
 
 def _write_traffic_log(payload):
     """Persist one traffic log entry. Runs on the executor thread."""
+    from utils.broker_context import BROKERS, broker_context
+
+    broker = payload.pop("broker", None)
+    if broker not in BROKERS:
+        return
     try:
-        TrafficLog.log_request(**payload)
+        with broker_context(broker):
+            TrafficLog.log_request(**payload)
     except Exception as e:
         logger.exception(f"Error writing traffic log: {e}")
     finally:
@@ -57,6 +63,7 @@ class TrafficLoggerMiddleware:
                 duration_ms = (time.time() - start_time) * 1000
                 # Capture request-context values now; the DB write happens on
                 # the executor thread where the Flask context is gone.
+                tab = getattr(g, "_tab_state", None) or {}
                 payload = {
                     "client_ip": get_real_ip(),
                     "method": request.method,
@@ -66,6 +73,7 @@ class TrafficLoggerMiddleware:
                     "host": request.host,
                     "error": error,
                     "user_id": getattr(g, "user_id", None),
+                    "broker": tab.get("broker"),
                 }
                 _traffic_log_executor.submit(_write_traffic_log, payload)
             except Exception as e:
@@ -97,11 +105,13 @@ def init_traffic_logging(app):
     # Initialize the logs database
     from database.traffic_db import init_logs_db, purge_old_traffic_logs
 
-    init_logs_db()
+    from utils.broker_context import run_for_each_broker
 
-    # Drop traffic log entries past the retention window so logs.db does not
-    # grow unbounded over the install's lifetime
-    purge_old_traffic_logs()
+    def _init_one():
+        init_logs_db()
+        purge_old_traffic_logs()
+
+    run_for_each_broker(_init_one)
 
     # Add middleware
     app.wsgi_app = TrafficLoggerMiddleware(app.wsgi_app)

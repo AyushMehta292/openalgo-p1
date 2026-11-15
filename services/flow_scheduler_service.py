@@ -63,20 +63,33 @@ def _next_aligned_start(value: int, unit: str) -> datetime:
 
 
 class FlowScheduler:
-    """Singleton scheduler for Flow workflows"""
+    """One Flow scheduler per broker. The job store is that broker's database."""
 
-    _instance: Optional["FlowScheduler"] = None
-    _scheduler: BackgroundScheduler | None = None
-    _lock = threading.Lock()
-    _initialized = False
-    _api_key: str | None = None
+    _instances: dict[str, "FlowScheduler"] = {}
+    _instances_lock = threading.Lock()
 
-    def __new__(cls):
-        if cls._instance is None:
-            with cls._lock:
-                if cls._instance is None:
-                    cls._instance = super().__new__(cls)
-        return cls._instance
+    def __new__(cls, broker_id: str | None = None):
+        from utils.broker_context import require_broker
+
+        broker_id = broker_id or require_broker()
+        with cls._instances_lock:
+            inst = cls._instances.get(broker_id)
+            if inst is None:
+                inst = super().__new__(cls)
+                inst._needs_init = True
+                cls._instances[broker_id] = inst
+            inst._pending_broker = broker_id
+            return inst
+
+    def __init__(self, broker_id: str | None = None):
+        if not getattr(self, "_needs_init", False):
+            return
+        self._needs_init = False
+        self.broker_id = broker_id or self._pending_broker
+        self._scheduler: BackgroundScheduler | None = None
+        self._lock = threading.Lock()
+        self._initialized = False
+        self._api_key: str | None = None
 
     def init(self, db_url: str = None, api_key: str = None):
         """Initialize the scheduler with database URL for job persistence"""
@@ -116,7 +129,9 @@ class FlowScheduler:
                     jobstores=jobstores,
                     job_defaults={"coalesce": True, "max_instances": 1, "misfire_grace_time": 60},
                 )
-                self._scheduler.start()
+                from utils.broker_context import start_in_broker
+
+                start_in_broker(self._scheduler, self.broker_id)
                 self._initialized = True
                 logger.debug("Flow Scheduler initialized and started")
             except Exception as e:
@@ -622,16 +637,36 @@ def execute_workflow_scheduled(
         remove_all_scoped_sessions()
 
 
-# Global scheduler instance
-flow_scheduler = FlowScheduler()
+class _FlowSchedulerProxy:
+    """Forwards to the scheduler of the broker context that is active."""
+
+    def __getattr__(self, name):
+        return getattr(get_flow_scheduler(), name)
 
 
 def get_flow_scheduler() -> FlowScheduler:
-    """Get the global flow scheduler instance"""
-    return flow_scheduler
+    """The Flow scheduler for the broker context that is active."""
+    return FlowScheduler()
+
+
+def shutdown_flow_schedulers() -> None:
+    """Stop every broker's Flow scheduler."""
+    for inst in list(FlowScheduler._instances.values()):
+        try:
+            inst.shutdown()
+        except Exception:
+            logger.exception("Could not stop the Flow scheduler for %s", getattr(inst, "broker_id", "?"))
+
+
+# Callers that imported flow_scheduler keep working once a broker is selected.
+flow_scheduler = _FlowSchedulerProxy()
 
 
 def init_flow_scheduler(db_url: str = None, api_key: str = None):
-    """Initialize the flow scheduler"""
-    flow_scheduler.init(db_url=db_url, api_key=api_key)
-    return flow_scheduler
+    """Initialize the flow scheduler for every broker, or the current one."""
+    from utils.broker_context import run_for_each_broker
+
+    def _one():
+        get_flow_scheduler().init(db_url=db_url, api_key=api_key)
+
+    run_for_each_broker(_one)

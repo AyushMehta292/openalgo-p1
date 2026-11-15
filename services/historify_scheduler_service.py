@@ -43,21 +43,34 @@ def release_schedule_run(schedule_id: str) -> None:
 
 
 class HistorifyScheduler:
-    """Singleton scheduler for Historify data downloads"""
+    """One Historify scheduler per broker. Downloads go to that broker's DuckDB."""
 
-    _instance: Optional["HistorifyScheduler"] = None
-    _scheduler: BackgroundScheduler | None = None
-    _lock = threading.Lock()
-    _initialized = False
-    _api_key: str | None = None
-    _socketio = None
+    _instances: dict[str, "HistorifyScheduler"] = {}
+    _instances_lock = threading.Lock()
 
-    def __new__(cls):
-        if cls._instance is None:
-            with cls._lock:
-                if cls._instance is None:
-                    cls._instance = super().__new__(cls)
-        return cls._instance
+    def __new__(cls, broker_id: str | None = None):
+        from utils.broker_context import require_broker
+
+        broker_id = broker_id or require_broker()
+        with cls._instances_lock:
+            inst = cls._instances.get(broker_id)
+            if inst is None:
+                inst = super().__new__(cls)
+                inst._needs_init = True
+                cls._instances[broker_id] = inst
+            inst._pending_broker = broker_id
+            return inst
+
+    def __init__(self, broker_id: str | None = None):
+        if not getattr(self, "_needs_init", False):
+            return
+        self._needs_init = False
+        self.broker_id = broker_id or self._pending_broker
+        self._scheduler: BackgroundScheduler | None = None
+        self._lock = threading.Lock()
+        self._initialized = False
+        self._api_key: str | None = None
+        self._socketio = None
 
     def init(self, db_url: str = None, api_key: str = None, socketio=None):
         """Initialize the scheduler with database URL for job persistence"""
@@ -102,7 +115,9 @@ class HistorifyScheduler:
                         "misfire_grace_time": 300,  # 5 minutes grace for missed jobs
                     },
                 )
-                self._scheduler.start()
+                from utils.broker_context import start_in_broker
+
+                start_in_broker(self._scheduler, self.broker_id)
                 self._initialized = True
                 logger.debug("Historify Scheduler initialized and started")
 
@@ -673,16 +688,34 @@ def execute_schedule(schedule_id: str, api_key: str = None):
         remove_all_scoped_sessions()
 
 
-# Global scheduler instance
-historify_scheduler = HistorifyScheduler()
+class _HistorifySchedulerProxy:
+    def __getattr__(self, name):
+        return getattr(get_historify_scheduler(), name)
 
 
 def get_historify_scheduler() -> HistorifyScheduler:
-    """Get the global historify scheduler instance"""
-    return historify_scheduler
+    """The Historify scheduler for the broker context that is active."""
+    return HistorifyScheduler()
+
+
+def shutdown_historify_schedulers() -> None:
+    for inst in list(HistorifyScheduler._instances.values()):
+        try:
+            inst.shutdown()
+        except Exception:
+            logger.exception(
+                "Could not stop the Historify scheduler for %s", getattr(inst, "broker_id", "?")
+            )
+
+
+historify_scheduler = _HistorifySchedulerProxy()
 
 
 def init_historify_scheduler(db_url: str = None, api_key: str = None, socketio=None):
-    """Initialize the historify scheduler"""
-    historify_scheduler.init(db_url=db_url, api_key=api_key, socketio=socketio)
-    return historify_scheduler
+    """Initialize the Historify scheduler for every broker, or the current one."""
+    from utils.broker_context import run_for_each_broker
+
+    def _one():
+        get_historify_scheduler().init(db_url=db_url, api_key=api_key, socketio=socketio)
+
+    run_for_each_broker(_one)

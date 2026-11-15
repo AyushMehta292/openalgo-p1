@@ -822,6 +822,10 @@ def _handle(
     if action == "start":
         raw_mode = payload.get("mode")
         mode = raw_mode.strip().lower() if isinstance(raw_mode, str) else None
+        from database.settings_db import effective_run_mode
+
+        # The broker's stored paper/live choice wins over the payload.
+        mode = effective_run_mode()
         if mode not in store.RUN_MODES:
             event_id = _audit(
                 "rejected_invalid_action",
@@ -840,26 +844,8 @@ def _handle(
                 webhook_event_id=event_id,
             )
 
-        # 7. The live gate. The whole difference between a paper test and real
-        #    money, and the reason a strategy is born sandbox-only.
-        if mode == "live" and not strategy.live_enabled:
-            logger.warning("Webhook refused: live start on sandbox-only strategy %s", strategy_id)
-            event_id = _audit(
-                "rejected_live_disabled",
-                strategy_id=strategy_id,
-                action=action,
-                mode=mode,
-                payload=safe_payload,
-                ip=ip,
-                user_agent=user_agent,
-                error="Live trading is not enabled for this strategy",
-            )
-            return _outcome(
-                "rejected_live_disabled",
-                "Live trading is not enabled for this strategy",
-                strategy_id=strategy_id,
-                webhook_event_id=event_id,
-            )
+        # 7. Paper versus live is the broker's stored choice, already applied
+        #    to ``mode``. A paper broker does not start live from this payload.
 
     # 8 and 9. Both windows are read and the claim is written under one lock,
     # so two deliveries arriving together cannot both pass.

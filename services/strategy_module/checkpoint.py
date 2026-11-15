@@ -129,34 +129,45 @@ def write_once(*, prune: bool | None = None) -> int:
 
     written = 0
     try:
-        for run_id in state.active_run_ids():
-            try:
-                # Under the lock: in-memory only. snapshot_for_checkpoint deep
-                # copies the legs, so what comes out is safe to write from
-                # outside, and the database work happens after the release.
-                with state.run_state(run_id) as run:
-                    if run is None:
-                        # Finished between active_run_ids() and here. Normal.
-                        continue
-                    snapshot = state.snapshot_for_checkpoint(run)
+        from utils.broker_context import BROKERS, broker_context, current_broker
 
-                if store.write_checkpoint(run_id, snapshot):
-                    written += 1
-                if prune:
-                    store.prune_checkpoints(run_id, CHECKPOINT_KEEP)
-            except Exception:
-                # One run's failure must not cost the others their durability,
-                # and must never end the loop: a writer that died on a single
-                # bad run would leave every run unrecoverable from then on.
-                logger.exception("Could not checkpoint run %s", run_id)
+        def _ids():
+            return list(state.active_run_ids())
+
+        if current_broker() in BROKERS:
+            run_ids = [(current_broker(), run_id) for run_id in _ids()]
+        else:
+            run_ids = []
+            for broker_name in BROKERS:
+                with broker_context(broker_name):
+                    run_ids.extend((broker_name, run_id) for run_id in _ids())
+            run_ids.extend(("", run_id) for run_id in _ids())
+
+        for broker_name, run_id in run_ids:
+            if broker_name:
+                _broker_cm = broker_context(broker_name)
+            else:
+                from contextlib import nullcontext
+
+                _broker_cm = nullcontext()
+            with _broker_cm:
+                try:
+                    with state.run_state(run_id) as run:
+                        if run is None:
+                            continue
+                        snapshot = state.snapshot_for_checkpoint(run)
+                    if store.write_checkpoint(run_id, snapshot):
+                        written += 1
+                    if prune:
+                        store.prune_checkpoints(run_id, CHECKPOINT_KEEP)
+                except Exception:
+                    logger.exception("Could not checkpoint run %s", run_id)
+        return written
     finally:
         # The loop runs outside any Flask app context, so teardown_appcontext
         # never fires and every session this pass bound would stay bound to the
-        # thread for the life of the worker. Same reason as the scheduler jobs
-        # in services/flow_scheduler_service.py.
+        # thread for the life of the worker.
         remove_all_scoped_sessions()
-
-    return written
 
 
 def _run_loop() -> None:

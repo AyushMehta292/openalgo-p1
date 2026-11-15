@@ -51,12 +51,44 @@ from utils.logging import get_logger
 logger = get_logger(__name__)
 
 
-# run_id -> the run's live state. Popped by clear_run_state when the run ends,
-# which is what keeps this from being an unbounded module-level registry.
-_run_state: dict[int, dict[str, Any]] = {}
+class _BrokerScoped:
+    """run_id -> value, separated by the broker context that is active.
 
-# run_id -> the lock guarding that run's state. Popped alongside the state.
-_state_locks: dict[int, threading.Lock] = {}
+    With no broker selected the bucket is empty-string, which is what tests
+    that never enter a broker use. A tick or checkpoint that enters fyers
+    cannot see deltaexchange's runs.
+    """
+
+    def __init__(self):
+        self._data: dict[tuple[str, int], Any] = {}
+
+    def _bucket(self) -> str:
+        from utils.broker_context import current_broker
+
+        return current_broker() or ""
+
+    def get(self, run_id, default=None):
+        return self._data.get((self._bucket(), run_id), default)
+
+    def __setitem__(self, run_id, value):
+        self._data[(self._bucket(), run_id)] = value
+
+    def __contains__(self, run_id):
+        return (self._bucket(), run_id) in self._data
+
+    def pop(self, run_id, *args):
+        return self._data.pop((self._bucket(), run_id), *args)
+
+    def __iter__(self):
+        bucket = self._bucket()
+        return iter(run_id for (broker, run_id) in self._data if broker == bucket)
+
+
+# run_id -> the run's live state, per broker. Popped by clear_run_state.
+_run_state = _BrokerScoped()
+
+# run_id -> the lock guarding that run's state, per broker.
+_state_locks = _BrokerScoped()
 
 # Guards the two dicts above while an entry is being created or removed. Held
 # only for the dict operation itself, never across a caller's critical section.
