@@ -77,6 +77,7 @@ from blueprints.latency import latency_bp  # Import the latency blueprint
 from blueprints.leverage import leverage_bp  # Import the leverage blueprint
 from blueprints.log import log_bp
 from blueprints.logging import logging_bp  # Import the logging blueprint
+from blueprints.missed_exit import missed_exit_bp
 from blueprints.master_contract_status import (
     master_contract_status_bp,  # Import the master contract status blueprint
 )
@@ -304,6 +305,7 @@ def create_app():
 
     # Register other blueprints
     app.register_blueprint(auth_bp)
+    app.register_blueprint(missed_exit_bp)
     app.register_blueprint(dashboard_bp)
     app.register_blueprint(orders_bp)
     app.register_blueprint(search_bp)

@@ -256,6 +256,60 @@ def test_each_broker_keeps_its_own_warning(store):
         assert resume.list_warnings() == []
 
 
+def test_the_open_tab_route_shows_only_that_brokers_warnings(store):
+    from flask import Flask, g, request, session
+
+    from blueprints.missed_exit import missed_exit_bp
+    from utils.broker_context import pop_broker, push_broker
+
+    app = Flask(__name__)
+    app.secret_key = "test"
+    app.config["TESTING"] = True
+    app.register_blueprint(missed_exit_bp)
+
+    @app.before_request
+    def _enter():
+        name = request.headers.get("X-OpenAlgo-Broker")
+        if name:
+            session["broker"] = name
+            g._broker_token = push_broker(name)
+
+    @app.teardown_request
+    def _leave(_exc=None):
+        pop_broker(getattr(g, "_broker_token", None))
+
+    with broker_context("fyers"):
+        _open_friday_gap()
+        resume.note_missed_clock("python:held", "15:15", source="python")
+
+    client = app.test_client()
+    with client.session_transaction() as cookie:
+        cookie["logged_in"] = True
+        cookie["user"] = "am"
+
+    fyers = client.get("/auth/missed-exits", headers={"X-OpenAlgo-Broker": "fyers"})
+    groww = client.get("/auth/missed-exits", headers={"X-OpenAlgo-Broker": "groww"})
+
+    assert fyers.status_code == 200
+    shown = fyers.get_json()["warnings"]
+    assert len(shown) == 1
+    assert shown[0]["can_confirm"] is True
+    assert "did not guess an exit" in shown[0]["detail"]
+    assert groww.get_json()["warnings"] == []
+
+
+def test_the_broker_tab_shell_carries_the_warning_banner():
+    from blueprints.react_app import serve_react_app
+
+    html = serve_react_app()
+    if isinstance(html, tuple):
+        pytest.skip("frontend dist is not built")
+    page = html.get_data(as_text=True)
+    assert "openalgo-missed-exits" in page
+    assert "Confirm close" in page
+    assert "/auth/missed-exits" in page
+
+
 def test_the_broker_tab_lists_a_warning_that_can_send_its_close(store):
     _open_friday_gap()
     resume.arm_first_tick("strategy-run:4")

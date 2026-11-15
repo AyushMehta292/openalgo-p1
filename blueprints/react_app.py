@@ -139,6 +139,91 @@ npm run build</pre>
   };
 })();
 </script>
+<script>
+(function () {
+  var KEY = "openalgo_broker";
+  function broker() {
+    try { return sessionStorage.getItem(KEY) || ""; } catch (e) { return ""; }
+  }
+  function csrf() {
+    return fetch("/auth/csrf-token", { credentials: "include" })
+      .then(function (response) { return response.json(); })
+      .then(function (data) { return data && data.csrf_token; })
+      .catch(function () { return null; });
+  }
+  function post(url) {
+    return csrf().then(function (token) {
+      var headers = { Accept: "application/json" };
+      if (token) headers["X-CSRFToken"] = token;
+      return fetch(url, {
+        method: "POST",
+        credentials: "include",
+        headers: headers
+      });
+    });
+  }
+  var root = document.createElement("div");
+  root.id = "openalgo-missed-exits";
+  root.setAttribute("role", "status");
+  root.style.cssText = "position:sticky;top:0;z-index:80;font-family:system-ui,sans-serif;";
+  function draw(warnings) {
+    root.textContent = "";
+    if (!warnings || !warnings.length) return;
+    var panel = document.createElement("div");
+    panel.style.cssText = "margin:0;padding:12px 16px;background:#fff7ed;color:#7c2d12;border-bottom:2px solid #c2410c;";
+    var title = document.createElement("strong");
+    title.textContent = "Missed exit while OpenAlgo was off";
+    panel.appendChild(title);
+    warnings.forEach(function (warning) {
+      var row = document.createElement("div");
+      row.style.cssText = "margin-top:10px;display:flex;gap:8px;align-items:flex-start;flex-wrap:wrap;";
+      var text = document.createElement("p");
+      text.style.cssText = "margin:0;flex:1;min-width:16rem;";
+      text.textContent = warning.detail || "";
+      row.appendChild(text);
+      if (warning.can_confirm) {
+        var confirm = document.createElement("button");
+        confirm.type = "button";
+        confirm.textContent = (warning.source === "python" || warning.source === "openscript")
+          ? "Confirm stop"
+          : "Confirm close";
+        confirm.style.cssText = "background:#c2410c;color:#fff;border:0;border-radius:6px;padding:6px 10px;cursor:pointer;";
+        confirm.addEventListener("click", function () {
+          confirm.disabled = true;
+          post("/auth/missed-exits/" + warning.id + "/confirm").then(load);
+        });
+        row.appendChild(confirm);
+      }
+      var clear = document.createElement("button");
+      clear.type = "button";
+      clear.textContent = "Clear";
+      clear.style.cssText = "background:#fff;color:#7c2d12;border:1px solid #c2410c;border-radius:6px;padding:6px 10px;cursor:pointer;";
+      clear.addEventListener("click", function () {
+        clear.disabled = true;
+        post("/auth/missed-exits/" + warning.id + "/clear").then(load);
+      });
+      row.appendChild(clear);
+      panel.appendChild(row);
+    });
+    root.appendChild(panel);
+  }
+  function load() {
+    if (!broker()) { draw([]); return; }
+    fetch("/auth/missed-exits", { credentials: "include" })
+      .then(function (response) { return response.ok ? response.json() : { warnings: [] }; })
+      .then(function (data) { draw((data && data.warnings) || []); })
+      .catch(function () { draw([]); });
+  }
+  function mount() {
+    if (!document.body) return;
+    document.body.insertBefore(root, document.body.firstChild);
+    load();
+    setInterval(load, 20000);
+  }
+  if (document.body) mount();
+  else document.addEventListener("DOMContentLoaded", mount);
+})();
+</script>
 """
     html = html.replace("<head>", "<head>" + snippet, 1)
     from flask import Response
