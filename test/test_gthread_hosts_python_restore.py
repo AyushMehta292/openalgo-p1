@@ -7,8 +7,10 @@ a strategy as down: one restarted it, the other's start was refused with
 and an error over the strategy the first had just started. The page showed an
 error while the strategy traded, and Stop only recorded a manual stop.
 
-initialize_with_app_context set its flag before doing the work and without a
-lock, so a second caller went on against half-restored state.
+initialize_with_app_context marks each broker done only after that broker's
+work finishes, and under a lock, so a second caller does not go on against
+half-restored state. A broker whose attempt raised is retried; one that
+finished is not.
 
 The first test runs two restore passes together against a strategy whose
 recorded process is gone. On the old code one of them marks the running
@@ -126,16 +128,22 @@ def test_login_restore_and_the_contracts_route_start_a_waiting_strategy_once(hos
     assert sorted(started for _, started, _ in results) == [0, 1]
 
 
-def test_initialisation_runs_once_and_is_marked_done_last(monkeypatch):
+def test_initialisation_runs_once_per_broker_and_is_marked_done_last(monkeypatch):
+    """Eight callers restore each broker once, and only after that work."""
+    from utils.broker_context import BROKERS, current_broker
+
+    saved_init = set(ps._initialized_brokers)
+    ps._initialized_brokers.clear()
     runs = []
-    seen_flag = []
+    marked_before_work = []
 
     def slow_restore():
-        seen_flag.append(ps._initialized)
-        runs.append(1)
+        marked_before_work.append(current_broker() in ps._initialized_brokers)
+        runs.append(current_broker())
         time.sleep(0.2)
 
-    monkeypatch.setattr(ps, "_initialized", False)
+    # Keep the test off the machine's real strategy_configs.json.
+    monkeypatch.setattr(ps, "load_configs", lambda: None)
     monkeypatch.setattr(ps, "restore_strategy_states", slow_restore)
     monkeypatch.setattr(ps, "daily_trading_day_check", lambda: None)
     monkeypatch.setattr(ps, "snapshot_strategy_configs", lambda: [])
@@ -146,36 +154,55 @@ def test_initialisation_runs_once_and_is_marked_done_last(monkeypatch):
     def init():
         barrier.wait()
         ps.initialize_with_app_context()
-        if not runs or not ps._initialized:
+        if set(ps._initialized_brokers) != set(BROKERS):
             returned_before_done.append(1)
 
-    threads = [threading.Thread(target=init) for _ in range(8)]
-    for t in threads:
-        t.start()
-    for t in threads:
-        t.join(10)
+    try:
+        threads = [threading.Thread(target=init) for _ in range(8)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(10)
 
-    assert len(runs) == 1
-    assert seen_flag == [False], "the flag was set before the work was done"
-    assert returned_before_done == [], "a caller went on before initialisation finished"
-    assert ps._initialized is True
+        assert runs == list(BROKERS)
+        assert marked_before_work == [False, False, False], (
+            "a broker was marked done before its restore finished"
+        )
+        assert returned_before_done == [], "a caller went on before initialisation finished"
+        assert set(ps._initialized_brokers) == set(BROKERS)
+    finally:
+        ps._initialized_brokers.clear()
+        ps._initialized_brokers.update(saved_init)
 
 
 def test_a_failed_initialisation_is_retried(monkeypatch):
+    """A broker whose init raised is tried again. One that finished is not."""
+    from utils.broker_context import BROKERS, current_broker
+
+    saved_init = set(ps._initialized_brokers)
+    ps._initialized_brokers.clear()
     attempts = []
 
     def failing_restore():
-        attempts.append(1)
-        if len(attempts) == 1:
+        broker = current_broker()
+        attempts.append(broker)
+        if broker == "fyers" and attempts.count("fyers") == 1:
             raise RuntimeError("no app context yet")
 
-    monkeypatch.setattr(ps, "_initialized", False)
+    monkeypatch.setattr(ps, "load_configs", lambda: None)
     monkeypatch.setattr(ps, "restore_strategy_states", failing_restore)
     monkeypatch.setattr(ps, "daily_trading_day_check", lambda: None)
     monkeypatch.setattr(ps, "snapshot_strategy_configs", lambda: [])
 
-    ps.initialize_with_app_context()
-    assert ps._initialized is False
-    ps.initialize_with_app_context()
-    assert ps._initialized is True
-    assert len(attempts) == 2
+    try:
+        ps.initialize_with_app_context()
+        assert set(ps._initialized_brokers) == {"deltaexchange", "groww"}
+
+        ps.initialize_with_app_context()
+        assert set(ps._initialized_brokers) == set(BROKERS)
+        assert attempts.count("fyers") == 2
+        assert attempts.count("deltaexchange") == 1
+        assert attempts.count("groww") == 1
+    finally:
+        ps._initialized_brokers.clear()
+        ps._initialized_brokers.update(saved_init)
