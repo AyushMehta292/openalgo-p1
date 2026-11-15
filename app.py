@@ -173,6 +173,10 @@ logger = get_logger(__name__)
 def create_app():
     # Initialize Flask application
     app = Flask(__name__)
+    from utils.tab_session import TabSessionInterface
+
+    # The broker is per browser tab. It is not stored in this cookie.
+    app.session_interface = TabSessionInterface()
 
     # Initialize SocketIO
     socketio.init_app(app)  # Link SocketIO to the Flask app
@@ -506,6 +510,42 @@ def create_app():
         # (after DB tables are created) to avoid "no such table" on fresh install
 
     @app.before_request
+    def bind_tab_broker():
+        """Enter this tab's broker before any route reads keys or SQLite.
+
+        The header is set by the page from sessionStorage, which is per tab.
+        Callbacks and the post-login redirect name the broker in the URL.
+        The shared sign-in cookie is not consulted.
+        """
+        from flask import g, request
+
+        from utils.broker_context import broker_from_http_request, push_broker
+
+        if request.path.startswith(("/static/", "/assets/", "/flow/webhook/", "/chartink/webhook/", "/strategy/webhook/")):
+            return
+        body_broker = ""
+        if request.path == "/auth/broker/login" and request.is_json:
+            body_broker = str((request.get_json(silent=True) or {}).get("broker") or "")
+        broker = broker_from_http_request(
+            request.path,
+            request.headers.get("X-OpenAlgo-Broker", ""),
+            request.args.get("broker", ""),
+            body_broker,
+        )
+        if not broker:
+            return
+        g._tab_state = {"broker": broker}
+        g._broker_token = push_broker(broker)
+
+    @app.teardown_request
+    def release_tab_broker(_exc=None):
+        from flask import g
+
+        from utils.broker_context import pop_broker
+
+        pop_broker(getattr(g, "_broker_token", None))
+
+    @app.before_request
     def wait_for_db_ready():
         """Block requests until background database initialization completes."""
         from flask import request
@@ -803,25 +843,38 @@ def setup_environment(app):
             ]
 
             db_init_start = time.time()
-            # max_workers=1 on purpose: 14 of the 20 functions above target the
-            # same file (openalgo.db), and SQLite permits one writer per file,
-            # so running them concurrently made them contend for the write lock
-            # rather than progress in parallel - the "database is locked" seen
-            # on fresh installs. The parallelism was never real; serialising is
-            # measurably faster on the restart path because it stops threads
-            # queueing behind each other. See PR #1734.
-            #
-            # The executor is kept rather than a plain loop so each function
-            # stays its own future: one database failing to initialise must not
-            # abort the other nineteen.
-            with ThreadPoolExecutor(max_workers=1) as executor:
-                futures = {executor.submit(func): name for name, func in db_init_functions}
-                for future in as_completed(futures):
-                    db_name = futures[future]
+            # One failure must not skip the other databases. Shared tables
+            # (administrator, calendar, freeze quantities) have no broker.
+            # Everything else is created once in each broker directory.
+            from utils.broker_context import BROKERS, broker_context
+
+            shared_names = {"User DB", "Market Calendar DB", "Qty Freeze DB"}
+
+            def _run_inits(pairs):
+                for db_name, func in pairs:
                     try:
-                        future.result()
+                        func()
                     except Exception:
                         logger.exception(f"Failed to initialize {db_name}")
+
+            _run_inits([item for item in db_init_functions if item[0] in shared_names])
+            from database.master_contract_status_db import init_db as init_master_contract_status
+
+            for broker_id in BROKERS:
+                with broker_context(broker_id):
+                    _run_inits([item for item in db_init_functions if item[0] not in shared_names])
+                    try:
+                        init_master_contract_status()
+                    except Exception:
+                        logger.exception("Failed to initialize Master Contract Status")
+                    try:
+                        from database.telegram_db import init_db as init_telegram
+                        from database.whatsapp_db import init_db as init_whatsapp
+
+                        init_telegram()
+                        init_whatsapp()
+                    except Exception:
+                        logger.exception("Failed to initialize Telegram or WhatsApp tables")
 
             db_init_time = (time.time() - db_init_start) * 1000
             logger.debug(f"All databases initialized ({db_init_time:.0f}ms)")
@@ -844,9 +897,10 @@ def setup_environment(app):
                     from subscribers.strategy_book_subscriber import (
                         register as register_strategy_book,
                     )
+                    from utils.broker_context import run_for_each_broker
                     from utils.event_bus import bus as _bus
 
-                    init_strategy_book_db()
+                    run_for_each_broker(init_strategy_book_db)
                     register_strategy_book(_bus)
                     break
                 except Exception:
@@ -884,21 +938,27 @@ def setup_environment(app):
                     restore_order_update_watches,
                 )
 
-                restore_order_update_watches()
+                from utils.broker_context import run_for_each_broker
+
+                run_for_each_broker(restore_order_update_watches)
             except Exception:
                 logger.exception("Failed to restore Flow order-update watches")
 
             try:
                 from services.flow_price_monitor_service import restore_price_alerts
 
-                restore_price_alerts()
+                from utils.broker_context import run_for_each_broker
+
+                run_for_each_broker(restore_price_alerts)
             except Exception:
                 logger.exception("Failed to restore Flow price alerts")
 
             try:
                 from services.flow_scheduler_service import reconcile_scheduler_jobs
 
-                reconcile_scheduler_jobs()
+                from utils.broker_context import run_for_each_broker
+
+                run_for_each_broker(reconcile_scheduler_jobs)
             except Exception:
                 logger.exception("Failed to reconcile Flow scheduler jobs")
 
@@ -942,15 +1002,18 @@ def setup_environment(app):
                 try:
                     from database.whatsapp_db import get_bot_config
                     from services.whatsapp_bot_service import whatsapp_bot_service
+                    from utils.broker_context import run_for_each_broker
 
-                    if not get_bot_config().get("is_paired"):
-                        logger.debug("WhatsApp: no paired session, skipping auto-start")
-                        return
-                    ok, msg = whatsapp_bot_service.start_bot()
-                    if ok:
-                        logger.info("WhatsApp bot auto-started from persisted session")
-                    else:
-                        logger.warning("WhatsApp bot auto-start failed: %s", msg)
+                    def _one():
+                        if not get_bot_config().get("is_paired"):
+                            return
+                        ok, msg = whatsapp_bot_service.start_bot()
+                        if ok:
+                            logger.info("WhatsApp bot auto-started from persisted session")
+                        else:
+                            logger.warning("WhatsApp bot auto-start failed: %s", msg)
+
+                    run_for_each_broker(_one)
                 except Exception:
                     logger.exception("WhatsApp bot auto-start crashed")
 
@@ -966,55 +1029,30 @@ def setup_environment(app):
             try:
                 from database.settings_db import get_analyze_mode
 
-                if get_analyze_mode():
+                from utils.broker_context import run_for_each_broker
+
+                def _start_sandbox_when_paper():
+                    if not get_analyze_mode():
+                        return
                     from sandbox.execution_thread import start_execution_engine
+                    from sandbox.position_manager import catchup_missed_settlements
                     from sandbox.squareoff_thread import start_squareoff_scheduler
 
-                    def start_engine():
-                        success, message = start_execution_engine()
-                        return ("execution_engine", success, message)
+                    # Same thread as the broker context. A pool thread would
+                    # not see which broker's sandbox database to open.
+                    ok, message = start_execution_engine()
+                    if ok:
+                        logger.debug("Execution engine auto-started (paper mode)")
+                    else:
+                        logger.warning(f"Failed to auto-start execution engine: {message}")
+                    ok, message = start_squareoff_scheduler()
+                    if ok:
+                        logger.debug("Square-off scheduler auto-started (paper mode)")
+                    else:
+                        logger.warning(f"Failed to auto-start square-off scheduler: {message}")
+                    catchup_missed_settlements()
 
-                    def start_scheduler():
-                        success, message = start_squareoff_scheduler()
-                        return ("squareoff_scheduler", success, message)
-
-                    def run_catchup():
-                        from sandbox.position_manager import catchup_missed_settlements
-
-                        catchup_missed_settlements()
-                        return ("catchup_settlement", True, "Completed")
-
-                    with ThreadPoolExecutor(max_workers=3) as executor:
-                        futures = [
-                            executor.submit(start_engine),
-                            executor.submit(start_scheduler),
-                            executor.submit(run_catchup),
-                        ]
-                        for future in as_completed(futures):
-                            try:
-                                service_name, success, message = future.result()
-                                if service_name == "execution_engine":
-                                    if success:
-                                        logger.debug(
-                                            "Execution engine auto-started (Analyzer mode is ON)"
-                                        )
-                                    else:
-                                        logger.warning(
-                                            f"Failed to auto-start execution engine: {message}"
-                                        )
-                                elif service_name == "squareoff_scheduler":
-                                    if success:
-                                        logger.debug(
-                                            "Square-off scheduler auto-started (Analyzer mode is ON)"
-                                        )
-                                    else:
-                                        logger.warning(
-                                            f"Failed to auto-start square-off scheduler: {message}"
-                                        )
-                                elif service_name == "catchup_settlement":
-                                    logger.debug("Catch-up settlement check completed on startup")
-                            except Exception as e:
-                                logger.error(f"Error starting service: {e}")
+                run_for_each_broker(_start_sandbox_when_paper)
             except Exception as e:
                 logger.error(f"Error checking analyzer mode on startup: {e}")
 
@@ -1068,7 +1106,13 @@ def _restore_caches_background():
         try:
             from database.cache_restoration import restore_all_caches
 
-            cache_result = restore_all_caches()
+            from utils.broker_context import run_for_each_broker
+
+            def _restore():
+                return restore_all_caches()
+
+            run_for_each_broker(_restore)
+            cache_result = {"success": True, "symbol_cache": {}, "auth_cache": {}}
 
             if cache_result["success"]:
                 symbol_count = cache_result["symbol_cache"].get("symbols_loaded", 0)

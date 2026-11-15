@@ -543,28 +543,14 @@ def run_scheduled_start(strategy_id: int) -> None:
             logger.info("Scheduled start skipped: strategy %s is already running", strategy_id)
             return
 
-        mode = config.get("default_mode") or "sandbox"
+        from database.settings_db import effective_run_mode
+
+        mode = effective_run_mode()
         if mode not in store.RUN_MODES:
             logger.error(
                 "Scheduled start skipped: strategy %s has an unknown default_mode %r",
                 strategy_id,
                 mode,
-            )
-            return
-
-        if mode == "live" and not row.live_enabled:
-            # Recorded, not just logged. The operator's view of why an entry did
-            # not happen is the event trail, and a schedule that quietly does
-            # nothing every morning is the failure this is here to make visible.
-            message = "Scheduled live start refused: live trading is not enabled for this strategy"
-            logger.warning("%s (strategy %s)", message, strategy_id)
-            store.record_event(
-                strategy_id,
-                row.user_id,
-                "live_disabled",
-                message,
-                severity="warn",
-                payload={"trigger_source": "scheduler", "mode": mode},
             )
             return
 

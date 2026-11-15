@@ -148,3 +148,23 @@ docs/audit/qa_audit/**/qa_sandbox_*.csv
 docs/audit/qa_audit/**/qa_live_*.csv
 # Excel writes a ~$-prefixed lock file next to any workbook left open.
 docs/audit/qa_audit/**/~$*
+
+# Runtime data: per-broker databases (db/brokers/, db/shared/), logs, keys, secrets
+db/*
+!db/readme.txt
+log/*
+!log/readme.md
+!log/strategies/
+log/strategies/*
+!log/strategies/.gitignore
+logs/
+keys/*
+!keys/.gitignore
+*.pem
+*.key
+.pytest_cache/
+
+# Local secrets and credentials (never commit)
+openalgo-secrets.txt
+*secrets*.txt
+openalgo-p1-*.json

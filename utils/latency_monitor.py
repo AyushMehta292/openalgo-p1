@@ -346,11 +346,13 @@ def wrap_resource_methods(resource_class, api_type):
 
 def init_latency_monitoring(app):
     """Initialize latency monitoring"""
-    # Initialize the latency database
-    init_latency_db()
+    from utils.broker_context import run_for_each_broker
 
-    # Auto-purge old data endpoint logs (keep order logs forever, purge data logs after 7 days)
-    purge_old_data_logs(days=7)
+    def _init_one():
+        init_latency_db()
+        purge_old_data_logs(days=7)
+
+    run_for_each_broker(_init_one)
 
     # Import all RESTX API resources
     from restx_api import api

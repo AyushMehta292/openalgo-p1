@@ -78,12 +78,15 @@ def _retry_duckdb_conflict(func):
 
 
 def get_db_path() -> str:
-    """Get absolute path to the DuckDB database file."""
-    if os.path.isabs(HISTORIFY_DB_PATH):
-        return HISTORIFY_DB_PATH
-    # Relative to the openalgo directory
-    base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    return os.path.join(base_dir, HISTORIFY_DB_PATH)
+    """Absolute path to this broker's Historify file, unless a custom path is set."""
+    if os.path.isabs(HISTORIFY_DB_PATH) or HISTORIFY_DB_PATH != "db/historify.duckdb":
+        if os.path.isabs(HISTORIFY_DB_PATH):
+            return HISTORIFY_DB_PATH
+        base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        return os.path.join(base_dir, HISTORIFY_DB_PATH)
+    from utils.broker_context import historify_file
+
+    return str(historify_file())
 
 
 def ensure_db_directory():

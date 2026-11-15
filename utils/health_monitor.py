@@ -695,7 +695,9 @@ def _collector_loop():
 
     while _collector_running:
         try:
-            collect_metrics()
+            from utils.broker_context import run_for_each_broker
+
+            run_for_each_broker(collect_metrics)
         except Exception as e:
             logger.exception(f"Error in collector loop: {e}")
 
@@ -760,11 +762,13 @@ def init_health_monitoring(app):
         app: Flask application instance
     """
     try:
-        # Initialize database
-        init_health_db()
+        from utils.broker_context import run_for_each_broker
 
-        # Purge old metrics
-        purge_old_metrics(days=HEALTH_RETENTION_DAYS)
+        def _init_one():
+            init_health_db()
+            purge_old_metrics(days=HEALTH_RETENTION_DAYS)
+
+        run_for_each_broker(_init_one)
 
         # Start collector (background daemon thread)
         start_health_collector()

@@ -25,7 +25,9 @@ from utils.logging import get_logger
 
 logger = get_logger(__name__)
 
-DATABASE_URL = os.getenv("DATABASE_URL")
+from utils.broker_context import database_url_for_module
+
+DATABASE_URL = database_url_for_module(os.getenv("DATABASE_URL"))
 
 # Conditionally create engine based on DB type
 if DATABASE_URL and "sqlite" in DATABASE_URL:

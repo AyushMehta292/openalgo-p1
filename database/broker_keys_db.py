@@ -178,6 +178,45 @@ def _to_record(row):
     )
 
 
+def uses_project_database() -> bool:
+    """True when this engine opens ``db/openalgo.db``, which is one file per broker.
+
+    A test engine pointed at a temporary file is not that layout, so reads stay
+    on the single file the test bound.
+    """
+    from pathlib import Path
+
+    from utils.broker_context import project_main_db
+
+    database = getattr(engine.url, "database", None)
+    if not database:
+        return False
+    path = Path(database)
+    if not path.is_absolute():
+        path = (Path.cwd() / path).resolve()
+    else:
+        path = path.resolve()
+    return path == project_main_db()
+
+
+def _with_each_broker_database(read):
+    """Call ``read`` once, or once inside each broker file when none is selected.
+
+    ``GET /api/broker/list`` does not name a broker, but each broker's keys
+    live in that broker's database. A request that already entered one reads
+    only that file.
+    """
+    from utils.broker_context import BROKERS, broker_context, current_broker
+
+    if not uses_project_database() or current_broker() in BROKERS:
+        return read()
+    found = []
+    for name in BROKERS:
+        with broker_context(name):
+            found.extend(read() or [])
+    return found
+
+
 def get_broker_keys(broker):
     """The stored keys of one broker.
 
@@ -188,15 +227,23 @@ def get_broker_keys(broker):
         StoredBrokerKeys | None: None when nothing is stored for it, or when the
         table does not exist yet.
     """
-    try:
-        row = BrokerKey.query.filter_by(broker=broker).first()
-        return _to_record(row) if row else None
-    except Exception as exc:
-        if not _table_missing(exc):
-            logger.exception(f"Could not read the saved keys for {broker}")
-        return None
-    finally:
-        db_session.remove()
+    from utils.broker_context import BROKERS, broker_context, current_broker
+
+    def _read():
+        try:
+            row = BrokerKey.query.filter_by(broker=broker).first()
+            return _to_record(row) if row else None
+        except Exception as exc:
+            if not _table_missing(exc):
+                logger.exception(f"Could not read the saved keys for {broker}")
+            return None
+        finally:
+            db_session.remove()
+
+    if uses_project_database() and broker in BROKERS and current_broker() != broker:
+        with broker_context(broker):
+            return _read()
+    return _read()
 
 
 def list_broker_keys():
@@ -206,15 +253,26 @@ def list_broker_keys():
         list[StoredBrokerKeys]: Empty when nothing is stored or the table does
         not exist yet.
     """
-    try:
-        rows = BrokerKey.query.order_by(BrokerKey.broker).all()
-        return [_to_record(row) for row in rows]
-    except Exception as exc:
-        if not _table_missing(exc):
-            logger.exception("Could not list the saved broker keys")
-        return []
-    finally:
-        db_session.remove()
+
+    def _read():
+        try:
+            rows = BrokerKey.query.order_by(BrokerKey.broker).all()
+            return [_to_record(row) for row in rows]
+        except Exception as exc:
+            if not _table_missing(exc):
+                logger.exception("Could not list the saved broker keys")
+            return []
+        finally:
+            db_session.remove()
+
+    found = []
+    seen = set()
+    for row in _with_each_broker_database(_read):
+        if row.broker in seen:
+            continue
+        seen.add(row.broker)
+        found.append(row)
+    return found
 
 
 def save_broker_keys(broker, values, redirect_url=None):
@@ -246,6 +304,9 @@ def save_broker_keys(broker, values, redirect_url=None):
             row.redirect_url = redirect_url
         row.updated_at = datetime.utcnow()
         db_session.commit()
+        from utils.broker_keys import forget_cached_broker_keys
+
+        forget_cached_broker_keys(broker)
         return True, "Saved."
     except Exception:
         db_session.rollback()
@@ -264,6 +325,9 @@ def delete_broker_keys(broker):
     try:
         deleted = BrokerKey.query.filter_by(broker=broker).delete()
         db_session.commit()
+        from utils.broker_keys import forget_cached_broker_keys
+
+        forget_cached_broker_keys(broker)
         return bool(deleted)
     except Exception:
         db_session.rollback()

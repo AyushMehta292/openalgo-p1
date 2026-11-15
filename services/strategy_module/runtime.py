@@ -31,15 +31,33 @@ from utils.logging import get_logger
 
 logger = get_logger(__name__)
 
-_started = False
+_started_brokers: set[str] = set()
+_shared_started = False
 
 
 def start_strategy_module() -> dict[str, bool]:
-    """Bring the module up. Idempotent. Returns what actually started."""
-    global _started
-    if _started:
+    """Bring the module up for every broker, or the current one. Idempotent."""
+    from utils.broker_context import run_for_each_broker
+
+    result: dict[str, bool] = {}
+
+    def _one() -> None:
+        nonlocal result
+        result = _start_current_broker()
+
+    run_for_each_broker(_one)
+    return result
+
+
+def _start_current_broker() -> dict[str, bool]:
+    """Recovery, prices and schedule for the broker that is selected."""
+    from utils.broker_context import require_broker
+
+    global _shared_started
+    broker = require_broker()
+    if broker in _started_brokers:
         return {}
-    _started = True
+    _started_brokers.add(broker)
 
     result: dict[str, bool] = {}
 
@@ -116,7 +134,6 @@ def _start_scheduler() -> None:
 
 def stop_strategy_module() -> None:
     """Stop the background pieces. For shutdown and for tests."""
-    global _started
     for what, fn in (
         ("checkpointing", _stop_checkpoint),
         ("scheduler", _stop_scheduler),
@@ -126,7 +143,7 @@ def stop_strategy_module() -> None:
             fn()
         except Exception:
             logger.exception("Strategy module: could not stop %s", what)
-    _started = False
+    _started_brokers.clear()
 
 
 def _stop_checkpoint() -> None:

@@ -1885,6 +1885,12 @@ def webhook(token):
             }
         ), 413
 
+    from database.strategy_module_db import get_strategy_by_webhook_token
+    from utils.broker_context import select_broker
+
+    if not select_broker(lambda: get_strategy_by_webhook_token(token) is not None):
+        return jsonify({"status": "error", "message": "Unknown webhook"}), 404
+
     outcome = handle_webhook(
         token,
         request.get_data(cache=False),

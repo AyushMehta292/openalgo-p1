@@ -338,9 +338,16 @@ def try_start_master_contract_download(broker: str, *, reset_status: bool = Fals
 
 
 def _run_claimed_download(broker: str):
-    """Run a download whose claim the caller already holds, then release it."""
+    """Run a download whose claim the caller already holds, then release it.
+
+    The worker is a new thread, so it does not keep the broker the request
+    selected. The contract is written into that broker's database.
+    """
+    from utils.broker_context import broker_context
+
     try:
-        return _download_master_contract(broker)
+        with broker_context(broker):
+            return _download_master_contract(broker)
     finally:
         _release_master_contract_download(broker)
 
@@ -375,8 +382,11 @@ def try_start_cached_master_contract_load(broker: str) -> bool:
 
 def _run_claimed_cached_load(broker: str):
     """Run a cached load whose claim the caller already holds, then release it."""
+    from utils.broker_context import broker_context
+
     try:
-        return load_existing_master_contract(broker)
+        with broker_context(broker):
+            return load_existing_master_contract(broker)
     finally:
         _release_master_contract_download(broker)
 
@@ -796,10 +806,11 @@ def handle_auth_success(auth_token, user_session_key, broker, feed_token=None, u
             {
                 "status": "success",
                 "message": "Authentication successful",
-                "redirect": "/dashboard",
+                "redirect": f"/dashboard?broker={broker}",
+                "broker": broker,
             }
         ), 200
-    return redirect(url_for("dashboard_bp.dashboard"))
+    return redirect(url_for("dashboard_bp.dashboard", broker=broker))
 
 
 def login_error_address(code, broker=None):

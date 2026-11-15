@@ -90,7 +90,60 @@ npm run build</pre>
         )
 
     index_path = FRONTEND_DIST / "index.html"
-    response = send_file(index_path, mimetype="text/html")
+    # The broker is per tab (sessionStorage), not the shared sign-in cookie.
+    # This runs before the app bundle so a ?broker= redirect is stored first,
+    # and every later fetch or XHR from this tab names that broker.
+    html = index_path.read_text(encoding="utf-8")
+    snippet = """<script>
+(function () {
+  var KEY = "openalgo_broker";
+  var ALLOWED = {fyers:1, deltaexchange:1, groww:1};
+  try {
+    var named = new URLSearchParams(location.search).get("broker");
+    if (named && ALLOWED[named]) sessionStorage.setItem(KEY, named);
+  } catch (e) {}
+  function broker() {
+    try { return sessionStorage.getItem(KEY) || ""; } catch (e) { return ""; }
+  }
+  function remember(data) {
+    if (!data) return;
+    if (ALLOWED[data.broker]) sessionStorage.setItem(KEY, data.broker);
+    var redir = data.redirect || data.url;
+    if (typeof redir === "string") {
+      var match = /[?&]broker=(fyers|deltaexchange|groww)/.exec(redir);
+      if (match) sessionStorage.setItem(KEY, match[1]);
+    }
+  }
+  var origFetch = window.fetch;
+  if (origFetch) {
+    window.fetch = function (input, init) {
+      init = init ? Object.assign({}, init) : {};
+      var headers = new Headers(init.headers || (input instanceof Request ? input.headers : undefined));
+      var name = broker();
+      if (name && !headers.has("X-OpenAlgo-Broker")) headers.set("X-OpenAlgo-Broker", name);
+      init.headers = headers;
+      return origFetch.call(this, input, init).then(function (response) {
+        response.clone().json().then(remember).catch(function () {});
+        return response;
+      });
+    };
+  }
+  var origSend = XMLHttpRequest.prototype.send;
+  XMLHttpRequest.prototype.send = function () {
+    var name = broker();
+    if (name) { try { this.setRequestHeader("X-OpenAlgo-Broker", name); } catch (e) {} }
+    this.addEventListener("load", function () {
+      try { remember(JSON.parse(this.responseText)); } catch (e) {}
+    });
+    return origSend.apply(this, arguments);
+  };
+})();
+</script>
+"""
+    html = html.replace("<head>", "<head>" + snippet, 1)
+    from flask import Response
+
+    response = Response(html, mimetype="text/html")
     # index.html references content-hashed asset URLs, so it must always be
     # revalidated — otherwise a browser could serve a stale shell pointing at
     # chunks that no longer exist after an update. "no-cache" means

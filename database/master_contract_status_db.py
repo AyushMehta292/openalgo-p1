@@ -54,11 +54,13 @@ class MasterContractStatus(Base):
     download_duration_seconds = Column(Integer, nullable=True)  # How long download took
 
 
-# Create table if it doesn't exist
-Base.metadata.create_all(bind=engine)
+def init_db():
+    """Create the status table in the current broker database."""
+    Base.metadata.create_all(bind=engine)
 
 
 def init_broker_status(broker):
+    init_db()
     """Initialize status for a broker when they login"""
     session = SessionLocal()
     try:

@@ -76,8 +76,8 @@ def init_db():
     # Create default settings only if no settings exist (with race condition protection)
     try:
         if not Settings.query.first():
-            logger.debug("Settings DB: Creating default configuration (Live Mode)")
-            default_settings = Settings(analyze_mode=False)
+            logger.debug("Settings DB: Creating default configuration (paper / analyzer)")
+            default_settings = Settings(analyze_mode=True)
             db_session.add(default_settings)
             db_session.commit()
     except Exception as e:
@@ -85,9 +85,43 @@ def init_db():
         logger.debug(f"Settings DB: Default config may already exist (race condition): {e}")
 
 
+def _mode_cache_key() -> str:
+    """Analyzer mode is per broker, so the cache key is too."""
+    from utils.broker_context import current_broker
+
+    return f"{current_broker() or ''}:analyze_mode"
+
+
+def effective_run_mode() -> str:
+    """The strategy-module mode this broker's paper/live choice drives.
+
+    Paper (analyzer on) is sandbox. Live is live. The first settings row for a
+    broker is paper.
+    """
+    return "sandbox" if get_analyze_mode() else "live"
+
+
+def _sync_strategy_module_mode(paper: bool) -> None:
+    """Make this broker's strategies follow the same paper or live choice."""
+    try:
+        from sqlalchemy.orm.attributes import flag_modified
+
+        from database.strategy_module_db import SmStrategy, db_session
+
+        for row in SmStrategy.query.all():
+            row.live_enabled = not paper
+            scheduler = dict(row.scheduler or {})
+            scheduler["default_mode"] = "sandbox" if paper else "live"
+            row.scheduler = scheduler
+            flag_modified(row, "scheduler")
+        db_session.commit()
+    except Exception:
+        logger.exception("Could not apply paper/live to the strategy module")
+
+
 def get_analyze_mode():
-    """Get current analyze mode setting (cached for 1 hour)"""
-    cache_key = "analyze_mode"
+    """Get current analyze mode setting (cached for 1 hour). True is paper."""
+    cache_key = _mode_cache_key()
 
     # Check cache first. One get, never a membership test then a subscript:
     # the entry can go between the two, and the KeyError failed the order.
@@ -100,7 +134,7 @@ def get_analyze_mode():
     generation = _settings_cache.generation
     settings = Settings.query.first()
     if not settings:
-        settings = Settings(analyze_mode=False)  # Default to Live Mode
+        settings = Settings(analyze_mode=True)  # First login for this broker is paper
         db_session.add(settings)
         db_session.commit()
 
@@ -111,7 +145,7 @@ def get_analyze_mode():
 
 
 def set_analyze_mode(mode: bool):
-    """Set analyze mode setting"""
+    """Set this broker's paper (True) or live (False) choice, and the strategy module with it."""
     settings = Settings.query.first()
     if not settings:
         settings = Settings(analyze_mode=mode)
@@ -123,7 +157,8 @@ def set_analyze_mode(mode: bool):
     # Invalidate cache after update. After the commit, never before, and an
     # invalidation rather than a delete: a reader that loaded the old mode
     # before this commit is then refused when it tries to store it.
-    _settings_cache.invalidate("analyze_mode")
+    _settings_cache.invalidate(_mode_cache_key())
+    _sync_strategy_module_mode(paper=bool(mode))
 
 
 # SMTP password encryption.

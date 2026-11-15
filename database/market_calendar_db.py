@@ -33,7 +33,9 @@ logger = get_logger(__name__)
 _timings_cache = LockedTTLCache(maxsize=500, ttl=3600)
 _holidays_cache = LockedTTLCache(maxsize=50, ttl=3600)
 
-DATABASE_URL = os.getenv("DATABASE_URL")
+from utils.broker_context import database_url_for_module
+
+DATABASE_URL = database_url_for_module(os.getenv("DATABASE_URL"))
 
 # Conditionally create engine based on DB type
 if DATABASE_URL and "sqlite" in DATABASE_URL:

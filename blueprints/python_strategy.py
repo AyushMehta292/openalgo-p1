@@ -240,10 +240,12 @@ def broadcast_status_update(strategy_id: str, status: str, message: str = None):
         SSE_SUBSCRIBERS.extend(active_subscribers)
 
 
-# File paths - use Path for cross-platform compatibility
-STRATEGIES_DIR = Path("strategies") / "scripts"
-LOGS_DIR = Path("log") / "strategies"  # Using existing log folder
-CONFIG_FILE = Path("strategies") / "strategy_configs.json"
+# Scripts, logs and the schedule file follow the tab's broker.
+from utils.broker_context import BrokerPath
+
+STRATEGIES_DIR = BrokerPath("scripts")
+LOGS_DIR = BrokerPath("logs")
+CONFIG_FILE = BrokerPath("config")
 
 # Detect operating system
 OS_TYPE = platform.system().lower()  # 'windows', 'linux', 'darwin'
@@ -285,17 +287,23 @@ def scheduler_job_defaults() -> dict:
 
 @releases_scoped_sessions
 def _run_daily_trading_day_check():
-    daily_trading_day_check()
+    from utils.broker_context import run_for_each_broker
+
+    run_for_each_broker(daily_trading_day_check)
 
 
 @releases_scoped_sessions
 def _run_market_hours_enforcer():
-    market_hours_enforcer()
+    from utils.broker_context import run_for_each_broker
+
+    run_for_each_broker(market_hours_enforcer)
 
 
 @releases_scoped_sessions
 def _run_dead_process_reaper():
-    cleanup_dead_processes()
+    from utils.broker_context import run_for_each_broker
+
+    run_for_each_broker(cleanup_dead_processes)
 
 
 @releases_scoped_sessions
@@ -3953,28 +3961,31 @@ init_scheduler()
 _initialized = False
 
 
-def initialize_with_app_context():
-    """Initialize components that require app context/database access.
+_initialized_brokers: set[str] = set()
 
-    Single flight: the first caller does the work while any other waits for it,
-    and the flag is set only once it has succeeded. It used to be set first,
-    without a lock, so a second caller returned at once and served requests
-    against strategy state that was still being restored, and a failed attempt
-    was never retried by the callers that had already given up on it.
-    """
-    global _initialized
-    if _initialized:
+
+def initialize_with_app_context():
+    """Restore each broker's strategies. One broker at a time, and only once."""
+    from utils.broker_context import run_for_each_broker
+
+    run_for_each_broker(_initialize_current_broker)
+
+
+def _initialize_current_broker():
+    from utils.broker_context import require_broker
+
+    broker = require_broker()
+    if broker in _initialized_brokers:
         return
     with _INIT_LOCK:
-        if _initialized:
+        if broker in _initialized_brokers:
             return
-        _initialize_locked()
+        if _initialize_locked():
+            _initialized_brokers.add(broker)
 
 
 def _initialize_locked():
-    """The one-time work. The caller holds _INIT_LOCK."""
-    global _initialized
-
+    """The one-time work for the current broker. The caller holds _INIT_LOCK."""
     try:
         # Now safe to restore strategy states (requires database)
         restore_strategy_states()
@@ -4003,12 +4014,11 @@ def _initialize_locked():
         # This stops any scheduled strategies if app starts on a weekend/holiday
         daily_trading_day_check()
 
-        # Set last, and only on success.
-        _initialized = True
         logger.debug(f"Python Strategy System fully initialized on {OS_TYPE}")
+        return True
     except Exception as e:
         logger.warning(f"Deferred initialization skipped (likely no app context yet): {e}")
-        _initialized = False  # Reset flag to retry later
+        return False
 
 
 # Note: Flask removed before_app_first_request in newer versions

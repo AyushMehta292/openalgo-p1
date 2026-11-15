@@ -311,6 +311,11 @@ def start_run(
     if not strategy_row:
         return StartResult(ok=False, error="Strategy not found")
 
+    # The broker's paper/live choice drives sandbox versus live. A caller that
+    # asked for the other mode follows the broker.
+    from database.settings_db import effective_run_mode
+
+    mode = effective_run_mode()
     if mode not in store.RUN_MODES:
         return StartResult(ok=False, error=f"Unknown run mode: {mode!r}")
 
@@ -329,13 +334,8 @@ def start_run(
             ),
         )
 
-    # Live is opt-in per strategy. Checked here as well as at every caller,
-    # because this is the last point before real orders.
-    if mode == "live" and not strategy_row.live_enabled:
-        return StartResult(
-            ok=False,
-            error="This strategy is not enabled for live trading. Enable it first.",
-        )
+    # Live follows the broker choice (effective_run_mode), not a separate
+    # per-strategy opt-in. Paper brokers never reach mode "live".
 
     strategy = store.strategy_to_dict(strategy_row)
     api_key = _api_key_for(user_id)
@@ -2128,17 +2128,29 @@ def _finalise(run_id: int, strategy_id: int, user_id: str, reason: str, message:
 def process_tick(symbol: str, exchange: str, ltp: float) -> None:
     """Evaluate every run holding this instrument against one price.
 
+    Each broker is entered on its own before any of its runs read SQLite.
     Runs are found by scanning the live states rather than by keeping a second
-    symbol index. A deployment has a handful of concurrent runs, so the scan is
-    cheap, and an index that drifts out of step with the state it describes is
-    a class of bug worth not having.
+    symbol index.
     """
-    for run_id in state.active_run_ids():
-        try:
-            _process_tick_for_run(run_id, symbol, exchange, ltp)
-        except Exception:
-            # One run's failure must not stop the others being evaluated.
-            logger.exception("Tick processing failed for run %s", run_id)
+    from utils.broker_context import BROKERS, broker_context, current_broker
+
+    def _one():
+        for run_id in state.active_run_ids():
+            try:
+                _process_tick_for_run(run_id, symbol, exchange, ltp)
+            except Exception:
+                # One run's failure must not stop the others being evaluated.
+                logger.exception("Tick processing failed for run %s", run_id)
+
+    if current_broker() in BROKERS:
+        _one()
+        return
+    for broker_name in BROKERS:
+        with broker_context(broker_name):
+            _one()
+    # Tests that never select a broker keep state in the empty bucket.
+    if current_broker() not in BROKERS:
+        _one()
 
 
 def _daily_loss_limit(strategy: dict[str, Any]) -> float | None:

@@ -148,14 +148,14 @@ def _stop_flow_scheduler() -> None:
     """Stop the Flow workflow scheduler."""
     module = _imported("services.flow_scheduler_service")
     if module is not None:
-        module.get_flow_scheduler().shutdown()
+        module.shutdown_flow_schedulers()
 
 
 def _stop_historify_scheduler() -> None:
     """Stop the Historify download scheduler."""
     module = _imported("services.historify_scheduler_service")
     if module is not None:
-        module.get_historify_scheduler().shutdown()
+        module.shutdown_historify_schedulers()
 
 
 def _stop_historify_downloads() -> None:

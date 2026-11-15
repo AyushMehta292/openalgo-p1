@@ -1021,6 +1021,11 @@ def api_toggle_strategy(strategy_id):
 def webhook(webhook_id):
     """Handle webhook from Chartink"""
     try:
+        from utils.broker_context import select_broker
+
+        if not select_broker(lambda: get_strategy_by_webhook_id(webhook_id) is not None):
+            logger.error(f"Strategy not found for webhook ID: {webhook_id}")
+            return jsonify({"status": "error", "error": "Invalid webhook ID"}), 404
         # Get strategy by webhook ID
         strategy = get_strategy_by_webhook_id(webhook_id)
         if not strategy:

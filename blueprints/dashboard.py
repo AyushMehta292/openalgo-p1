@@ -1,6 +1,6 @@
 from flask import Blueprint, redirect, render_template, session, url_for
 
-from database.auth_db import get_api_key_for_tradingview, get_auth_token
+from database.auth_db import get_auth_token
 from database.settings_db import get_analyze_mode
 from services.funds_service import get_funds
 from utils.logging import get_logger
@@ -29,13 +29,13 @@ def dashboard():
 
     # Check if in analyze mode and route accordingly
     if get_analyze_mode():
-        # Get API key for sandbox mode
-        api_key = get_api_key_for_tradingview(login_username)
-        if api_key:
-            success, response, status_code = get_funds(api_key=api_key)
-        else:
-            logger.error("No API key found for analyze mode")
-            return "API key required for analyze mode", 400
+        from sandbox.fund_manager import get_user_funds
+
+        funds = get_user_funds(login_username)
+        if not funds:
+            logger.error("Could not read analyzer funds")
+            return "Could not read analyzer funds", 500
+        return render_template("dashboard.html", margin_data=funds)
     else:
         # Use live broker
         success, response, status_code = get_funds(auth_token=AUTH_TOKEN, broker=broker)

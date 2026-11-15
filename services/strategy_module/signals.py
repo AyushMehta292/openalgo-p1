@@ -257,7 +257,9 @@ def _day_run_locked(strategy: Any) -> tuple[int | None, str | None]:
             if not _finalise_stale_run(strategy, run_id):
                 return run_id, None
 
-    mode = "live" if live_enabled else "sandbox"
+    from database.settings_db import effective_run_mode
+
+    mode = effective_run_mode()
     api_key = _api_key_for(user_id)
     broker = ""
     broker_account = None
