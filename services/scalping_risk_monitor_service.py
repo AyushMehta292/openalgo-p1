@@ -425,6 +425,20 @@ class ScalpingRiskMonitor:
                 if result["breached"]:
                     exits.append((key, state, result["reason"]))
                     continue
+                try:
+                    from services.downtime_resume import block_automatic_exit
+
+                    block_automatic_exit(
+                        "scalping:{symbol}:{exchange}:{product}".format(
+                            symbol=state.get("symbol") or "",
+                            exchange=state.get("exchange") or "",
+                            product=state.get("product") or "",
+                        ),
+                        False,
+                        rule="stop",
+                    )
+                except Exception:
+                    logger.debug("Could not clear the first-tick hold for %s", state.get("symbol"))
                 moved = (
                     result["current_sl"] != state.get("current_sl")
                     or result["highest_price"] != state.get("highest_price")
@@ -478,6 +492,37 @@ class ScalpingRiskMonitor:
 
     # ------------------------------------------------------------------ exit
     def _dispatch_exit(self, key: str, state: dict, reason: str | None, ltp: float) -> None:
+        subject = "scalping:{symbol}:{exchange}:{product}".format(
+            symbol=state.get("symbol") or "",
+            exchange=state.get("exchange") or "",
+            product=state.get("product") or "",
+        )
+        try:
+            from services.downtime_resume import block_automatic_exit
+
+            if block_automatic_exit(
+                subject,
+                True,
+                rule=reason or "stop",
+                price=str(ltp),
+                symbol=state.get("symbol"),
+                source="first_tick",
+                close={
+                    "action": "scalping_exit",
+                    "symbol": state.get("symbol"),
+                    "exchange": state.get("exchange"),
+                    "product": state.get("product"),
+                    "reason": reason or "sl",
+                    "ltp": ltp,
+                },
+            ):
+                logger.warning(
+                    "Scalping stop for %s is still breached after resume; the close was not sent",
+                    state.get("symbol"),
+                )
+                return
+        except Exception:
+            logger.exception("Could not judge the scalping stop for %s after resume", state.get("symbol"))
         now = time.monotonic()
         # The in-flight check and its marker are one decision, made under the
         # lock: exit workers clear the marker from their own threads.
@@ -500,6 +545,20 @@ class ScalpingRiskMonitor:
             daemon=True,
         )
         worker.start()
+
+    def confirm_exit(self, symbol, exchange, product, reason, ltp: float) -> None:
+        """Send the close AM confirmed. This does not ask the resume hold again."""
+        key = _slkey(symbol, exchange, product)
+        with self._lock:
+            state = dict(self._states.get(key) or {})
+        if not state:
+            state = {
+                "symbol": symbol,
+                "exchange": exchange,
+                "product": product,
+                "side": "BUY",
+            }
+        self._exit_worker(key, state, reason, float(ltp or 0))
 
     def _exit_worker(self, key: str, state: dict, reason: str | None, ltp: float) -> None:
         symbol = state["symbol"]

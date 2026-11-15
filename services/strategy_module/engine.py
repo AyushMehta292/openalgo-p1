@@ -2401,6 +2401,35 @@ def _process_tick_for_run(run_id: int, symbol: str, exchange: str, ltp: float) -
         _note_unactionable(strategy["id"], user_id, run_id, leg_exits, stop_reason, reason=refusal)
         return
 
+    from services.downtime_resume import block_automatic_exit
+
+    rule = stop_reason or (leg_exits[0][1] if leg_exits else "stop")
+    held_close = None
+    if leg_exits or stop_reason:
+        held_close = {
+            "action": "strategy_stop" if stop_reason else "strategy_legs",
+            "run_id": run_id,
+            "user_id": user_id,
+            "stop_reason": stop_reason,
+            "mode": run_mode,
+            "legs": [{"leg_id": leg_id, "kind": kind} for leg_id, kind in leg_exits],
+        }
+    if block_automatic_exit(
+        f"strategy-run:{run_id}",
+        bool(leg_exits or stop_reason),
+        rule=str(rule),
+        price=str(ltp),
+        symbol=symbol,
+        source="first_tick",
+        close=held_close,
+    ):
+        logger.warning(
+            "Run %s is still through its %s after resume; the close was not sent",
+            run_id,
+            rule,
+        )
+        return
+
     if stop_reason:
         # A strategy-level breach closes everything, so the per-leg exits it
         # would also have triggered are redundant.
