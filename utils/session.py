@@ -198,6 +198,14 @@ def is_session_valid():
         logger.debug("Session expiry disabled (crypto broker / 24/7 market)")
         return True
 
+    # Fyers, Delta Exchange, and Groww stay logged in across 03:00. A funds
+    # check, not the clock, is what ends one of those tokens.
+    from utils.daily_token_check import keeps_login_across_rollover
+
+    if keeps_login_across_rollover(session.get("broker")):
+        logger.debug("Session kept across the rollover until the broker rejects its token")
+        return True
+
     now_utc = datetime.now(pytz.timezone("UTC"))
     now_ist = now_utc.astimezone(pytz.timezone("Asia/Kolkata"))
 
@@ -455,9 +463,20 @@ def check_session_validity(f):
             # refused and kept, and it never held the broker token, so it must
             # not revoke it. Tearing it down signed the trader out whenever
             # those pages touched a route like this, such as the error reporter.
+            #
+            # Fyers, Delta Exchange, and Groww are not torn down because the
+            # clock passed. A request that has not named a broker is not
+            # either: the page load has no tab header yet, and revoking here
+            # would end a token the broker has not rejected.
             if session.get("logged_in"):
-                revoke_user_tokens()
-                session.clear()
+                from utils.daily_token_check import clock_may_revoke
+
+                broker = session.get("broker")
+                if clock_may_revoke(broker):
+                    revoke_user_tokens()
+                    session.clear()
+                elif broker:
+                    session.clear()
 
             # Check if this is an AJAX/fetch request
             from flask import jsonify, request
