@@ -17,6 +17,28 @@ StartResponse = Callable[..., Any]
 WSGIApp = Callable[[WSGIEnviron, StartResponse], Iterable[bytes]]
 
 
+def _broker_named_by_request(environ: WSGIEnviron) -> str | None:
+    """The broker this WSGI request names, or None when it names none.
+
+    Matches ``broker_from_http_request``: header, query, then the path.
+    The JSON body is left for the Flask hook; reading it here would consume
+    the WSGI input before the view sees it.
+    """
+    from urllib.parse import parse_qs
+
+    from utils.broker_context import broker_from_http_request
+
+    query_values = parse_qs(environ.get("QUERY_STRING") or "", keep_blank_values=False).get(
+        "broker"
+    ) or [""]
+    return broker_from_http_request(
+        environ.get("PATH_INFO") or "",
+        environ.get("HTTP_X_OPENALGO_BROKER") or "",
+        query_values[0],
+        "",
+    )
+
+
 class SecurityMiddleware:
     """WSGI middleware that blocks requests from banned IP addresses.
 
@@ -55,11 +77,19 @@ class SecurityMiddleware:
         # Get real client IP (handles proxies)
         client_ip = get_real_ip_from_environ(environ)
 
-        # Check if IP is banned — this opens a logs_session connection.
-        # Must clean up in ALL paths (banned and non-banned) because this
-        # runs at WSGI level, outside Flask's teardown_appcontext scope.
+        # The ban list lives in the broker's logs database. A request that
+        # has not named a broker (setup, login) must not open that file.
+        # When the request does name one, enter that context for the check
+        # only: this middleware runs before Flask's before_request hook.
+        broker = _broker_named_by_request(environ)
+        if not broker:
+            return self.app(environ, start_response)
+
         try:
-            is_banned = IPBan.is_ip_banned(client_ip)
+            from utils.broker_context import broker_context
+
+            with broker_context(broker):
+                is_banned = IPBan.is_ip_banned(client_ip)
         finally:
             logs_session.remove()
 
@@ -89,6 +119,12 @@ def check_ip_ban(f: Callable[..., Any]) -> Callable[..., Any]:
 
     @wraps(f)
     def decorated_function(*args: Any, **kwargs: Any) -> Any:
+        from utils.broker_context import BROKERS, current_broker
+
+        # Same rule as the middleware: no broker selected means no ban lookup.
+        if current_broker() not in BROKERS:
+            return f(*args, **kwargs)
+
         client_ip = get_real_ip()
 
         if IPBan.is_ip_banned(client_ip):
