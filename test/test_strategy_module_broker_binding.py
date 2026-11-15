@@ -277,11 +277,9 @@ def test_a_stop_after_switching_brokers_sends_nothing_to_the_new_broker(session,
     _assert_still_managed(sid, run_id)
 
 
-def test_a_login_to_another_broker_is_refused_while_a_live_run_trades_elsewhere(session):
-    """AUDIT R02 (admission). After a logout no broker session is stored, and
-    with no login on record the switch check had nothing to go on, so a login
-    to another broker went ahead under a Live run. The run records its broker,
-    and that is what holds the switch now."""
+def test_a_live_run_on_one_broker_does_not_refuse_another_brokers_login(session):
+    """Each tab names its broker. A Live run on Zerodha stays there and does
+    not refuse a login to Fyers."""
     from utils import broker_switch
 
     _sid, run_id = _start("live")
@@ -289,15 +287,13 @@ def test_a_login_to_another_broker_is_refused_while_a_live_run_trades_elsewhere(
     with (
         patch("utils.broker_keys.live_broker", return_value=None),
         patch.object(broker_switch, "previous_broker", return_value=None),
-        # The platform-wide analyzer toggle lives in the settings table, which
-        # this file does not create: Live, as a fresh install starts.
         patch("database.settings_db.get_analyze_mode", return_value=False),
     ):
         other = broker_switch.refusal_for_login("fyers", USER)
         same = broker_switch.refusal_for_login("zerodha", USER)
 
     assert store.get_run(run_id).broker == "zerodha"
-    assert other.startswith("Zerodha still has 1 running Live strategy")
+    assert other is None
     assert same is None
 
 
