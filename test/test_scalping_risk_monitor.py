@@ -256,8 +256,13 @@ class TestModeSegregation:
             ran.set()
 
         monkeypatch.setattr(mon, "sync", slow_sync)
+        from utils.broker_context import broker_context
+
         t0 = _t.monotonic()
-        mon.request_sync()
+        # The worker opens the broker database, so a sync is scheduled only
+        # after a broker has been entered. The thread re-enters that broker.
+        with broker_context("fyers"):
+            mon.request_sync()
         elapsed = _t.monotonic() - t0
         assert elapsed < 0.1, f"request_sync blocked for {elapsed:.3f}s"
         assert ran.wait(2.0), "background sync did not run"
