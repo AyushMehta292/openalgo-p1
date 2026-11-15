@@ -31,11 +31,17 @@ def isolated_configs(tmp_path, monkeypatch):
     monkeypatch.setattr(ps, "CONFIG_FILE", tmp_path / "strategy_configs.json")
     saved = dict(ps.STRATEGY_CONFIGS)
     ps.STRATEGY_CONFIGS.clear()
-    monkeypatch.setattr(ps, "_CONFIG_GENERATION", 0, raising=False)
-    monkeypatch.setattr(ps, "_PERSISTED_GENERATION", 0, raising=False)
+    saved_generation = dict(ps._CONFIG_GENERATION)
+    saved_persisted = dict(ps._PERSISTED_GENERATION)
+    ps._CONFIG_GENERATION.clear()
+    ps._PERSISTED_GENERATION.clear()
     yield tmp_path
     ps.STRATEGY_CONFIGS.clear()
     ps.STRATEGY_CONFIGS.update(saved)
+    ps._CONFIG_GENERATION.clear()
+    ps._CONFIG_GENERATION.update(saved_generation)
+    ps._PERSISTED_GENERATION.clear()
+    ps._PERSISTED_GENERATION.update(saved_persisted)
 
 
 def _config(sid):

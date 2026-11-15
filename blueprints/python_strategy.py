@@ -63,9 +63,78 @@ python_strategy_bp = Blueprint("python_strategy_bp", __name__, url_prefix="/pyth
 # Timezone configuration - Indian Standard Time
 IST = pytz.timezone("Asia/Kolkata")
 
-# Global storage with thread locks for safety
+
+class _BrokerStrategyConfigs:
+    """strategy_id -> config for the broker selected in this context.
+
+    One map per broker, and an empty-string map when no broker is selected
+    (import time, and tests that never enter a broker). Reads and writes follow
+    the context variable, so a save cannot copy one broker's strategies into
+    another's file.
+    """
+
+    def __init__(self):
+        self._by_broker: dict[str, dict] = {}
+
+    def _current(self) -> dict:
+        from utils.broker_context import current_broker
+
+        key = current_broker() or ""
+        bucket = self._by_broker.get(key)
+        if bucket is None:
+            bucket = {}
+            self._by_broker[key] = bucket
+        return bucket
+
+    def get(self, strategy_id, default=None):
+        return self._current().get(strategy_id, default)
+
+    def __getitem__(self, strategy_id):
+        return self._current()[strategy_id]
+
+    def __setitem__(self, strategy_id, config):
+        self._current()[strategy_id] = config
+
+    def __delitem__(self, strategy_id):
+        del self._current()[strategy_id]
+
+    def __contains__(self, strategy_id):
+        return strategy_id in self._current()
+
+    def __iter__(self):
+        return iter(self._current())
+
+    def __len__(self):
+        return len(self._current())
+
+    def __eq__(self, other):
+        if isinstance(other, _BrokerStrategyConfigs):
+            return self._current() == other._current()
+        return self._current() == other
+
+    def items(self):
+        return self._current().items()
+
+    def keys(self):
+        return self._current().keys()
+
+    def values(self):
+        return self._current().values()
+
+    def clear(self):
+        self._current().clear()
+
+    def update(self, other=(), **kwargs):
+        self._current().update(other, **kwargs)
+
+    def pop(self, strategy_id, *args):
+        return self._current().pop(strategy_id, *args)
+
+
+# Process registries. RUNNING_STRATEGIES is keyed by strategy id.
+# STRATEGY_CONFIGS is one map per broker (see _BrokerStrategyConfigs).
 RUNNING_STRATEGIES = {}  # {strategy_id: {'process': subprocess.Popen, 'started_at': datetime}}
-STRATEGY_CONFIGS = {}  # {strategy_id: config_dict}
+STRATEGY_CONFIGS = _BrokerStrategyConfigs()
 # Strategies whose process is being terminated right now. stop_strategy_process
 # waits outside PROCESS_LOCK, so between claiming a strategy and writing its
 # bookkeeping back it is in neither RUNNING_STRATEGIES nor finished. Without a
@@ -93,12 +162,14 @@ PROCESS_LOCK = threading.RLock()  # Reentrant lock for nested process operations
 # stop and status read.
 _CONFIG_FILE_LOCK = threading.Lock()
 
-# Generation of STRATEGY_CONFIGS stamped by each save under PROCESS_LOCK. Two
-# savers can serialise as generation 1 and 2 and then reach the file lock as 2
-# and 1; the older one sees a newer generation already on disk and skips, so
-# persisted state never rolls backwards.
-_CONFIG_GENERATION = 0
-_PERSISTED_GENERATION = 0
+# Generation of the current broker's configs, stamped by each save under
+# PROCESS_LOCK. Two savers of the same broker can serialise as generation 1
+# and 2 and then reach the file lock as 2 and 1; the older one sees a newer
+# generation already on disk and skips, so persisted state never rolls
+# backwards. The counter is per broker: a deltaexchange save must not make a
+# slower fyers save skip, and the two write different files.
+_CONFIG_GENERATION: dict[str, int] = {}
+_PERSISTED_GENERATION: dict[str, int] = {}
 
 # Set once shutdown begins. Every start refuses after it, so a scheduled start
 # already in flight cannot launch a child behind the cleanup that is stopping
@@ -361,35 +432,49 @@ def init_scheduler():
         logger.debug("Dead-process reaper scheduled (runs every 60 seconds)")
 
 
+def _config_scope() -> str:
+    """Broker whose strategy file this call reads or writes. Empty if none."""
+    from utils.broker_context import current_broker
+
+    return current_broker() or ""
+
+
 def load_configs():
-    """Load strategy configurations from file. Backfills `exchange` for
-    legacy configs (default NSE) so the exchange-aware scheduler always
-    has a value to dispatch on."""
-    global STRATEGY_CONFIGS
-    if CONFIG_FILE.exists():
-        try:
-            with open(CONFIG_FILE, encoding="utf-8") as f:
-                loaded = json.load(f)
-            mutated = False
-            # Backfilled before it is published, then published with one
-            # rebind, so no reader ever sees a half backfilled map.
-            for cfg in loaded.values():
-                if "exchange" not in cfg or not cfg.get("exchange"):
-                    cfg["exchange"] = "NSE"
+    """Load the current broker's strategy configurations from its file.
+
+    Backfills ``exchange`` for legacy configs (default NSE) so the
+    exchange-aware scheduler always has a value to dispatch on. The map is
+    published in one step, so no reader sees a half-backfilled config.
+
+    Import time runs this with no broker selected, which reads only the legacy
+    ``strategies/strategy_configs.json``. Each broker's file is loaded from
+    ``_initialize_current_broker``.
+    """
+    if not CONFIG_FILE.exists():
+        return
+    try:
+        with open(CONFIG_FILE, encoding="utf-8") as f:
+            loaded = json.load(f)
+        mutated = False
+        for cfg in loaded.values():
+            if "exchange" not in cfg or not cfg.get("exchange"):
+                cfg["exchange"] = "NSE"
+                mutated = True
+            else:
+                upper = str(cfg["exchange"]).upper()
+                if upper != cfg["exchange"]:
+                    cfg["exchange"] = upper
                     mutated = True
-                else:
-                    upper = str(cfg["exchange"]).upper()
-                    if upper != cfg["exchange"]:
-                        cfg["exchange"] = upper
-                        mutated = True
-            with PROCESS_LOCK:
-                STRATEGY_CONFIGS = loaded
-            if mutated:
-                save_configs()
-            logger.debug(f"Loaded {len(STRATEGY_CONFIGS)} strategy configurations")
-        except Exception as e:
-            logger.exception(f"Failed to load configs: {e}")
-            STRATEGY_CONFIGS = {}
+    except Exception as e:
+        logger.exception(f"Failed to load configs: {e}")
+        loaded = {}
+        mutated = False
+    with PROCESS_LOCK:
+        STRATEGY_CONFIGS.clear()
+        STRATEGY_CONFIGS.update(loaded)
+    if mutated:
+        save_configs()
+    logger.debug(f"Loaded {len(STRATEGY_CONFIGS)} strategy configurations")
 
 
 def save_configs() -> bool:
@@ -415,37 +500,39 @@ def save_configs() -> bool:
 
     A failure is logged and reported as False; callers that ignore the answer
     behave as they always did.
-    """
-    global _CONFIG_GENERATION, _PERSISTED_GENERATION
 
+    The snapshot, its generation and the destination path are taken together
+    for the broker that is selected now. A later save for another broker uses
+    its own generation and its own file.
+    """
     try:
         with PROCESS_LOCK:
-            _CONFIG_GENERATION += 1
-            generation = _CONFIG_GENERATION
-            payload = json.dumps(STRATEGY_CONFIGS, indent=2, default=str, ensure_ascii=False)
+            scope = _config_scope()
+            generation = _CONFIG_GENERATION.get(scope, 0) + 1
+            _CONFIG_GENERATION[scope] = generation
+            payload = json.dumps(dict(STRATEGY_CONFIGS), indent=2, default=str, ensure_ascii=False)
+            target = Path(os.fspath(CONFIG_FILE))
     except Exception as e:
         logger.exception(f"Failed to save configs: {e}")
         return False
 
     with _CONFIG_FILE_LOCK:
-        if generation <= _PERSISTED_GENERATION:
+        if generation <= _PERSISTED_GENERATION.get(scope, 0):
             # A newer snapshot, which includes this caller's change, is
             # already on disk. Writing this one would roll it back.
             return True
 
         tmp_path = None
         try:
-            CONFIG_FILE.parent.mkdir(parents=True, exist_ok=True)
-            tmp_path = CONFIG_FILE.with_name(
-                f"{CONFIG_FILE.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp"
-            )
+            target.parent.mkdir(parents=True, exist_ok=True)
+            tmp_path = target.with_name(f"{target.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp")
             with open(tmp_path, "w", encoding="utf-8") as f:
                 f.write(payload)
                 f.flush()
                 os.fsync(f.fileno())
-            os.replace(tmp_path, CONFIG_FILE)
+            os.replace(tmp_path, target)
             tmp_path = None
-            _PERSISTED_GENERATION = generation
+            _PERSISTED_GENERATION[scope] = generation
             logger.debug("Configurations saved")
             return True
         except Exception as e:
@@ -3991,15 +4078,15 @@ def restore_strategies_after_login():
     return success, message
 
 
-# Initialize basic components on import (no database access)
+# Legacy file only. No broker is selected yet, so this does not read
+# db/brokers/<broker>/strategies/strategy_configs.json. Startup loads each
+# broker from _initialize_current_broker.
 ensure_directories()
 load_configs()
 init_scheduler()
 
-# Flag to track if full initialization has been done
-_initialized = False
-
-
+# Brokers whose strategy file has been loaded and restored. A broker is added
+# only after that work succeeds, so a failed attempt is retried.
 _initialized_brokers: set[str] = set()
 
 
@@ -4026,6 +4113,10 @@ def _initialize_current_broker():
 def _initialize_locked():
     """The one-time work for the current broker. The caller holds _INIT_LOCK."""
     try:
+        # Import loaded the legacy file with no broker selected. This broker's
+        # strategies live in its own strategy_configs.json.
+        load_configs()
+
         # Now safe to restore strategy states (requires database)
         restore_strategy_states()
 

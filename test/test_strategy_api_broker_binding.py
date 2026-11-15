@@ -99,12 +99,6 @@ def test_python_strategy_env_includes_openalgo_broker(monkeypatch, tmp_path):
     strat = tmp_path / "noop.py"
     strat.write_text("import sys; sys.exit(0)\n")
 
-    ps_module.STRATEGY_CONFIGS["broker-env"] = {
-        "name": "BrokerEnv",
-        "file_path": str(strat),
-        "user_id": "bob",
-        "exchange": "NSE",
-    }
     # Ensure a previous run is not left registered.
     ps_module.RUNNING_STRATEGIES.pop("broker-env", None)
     ps_module.STOPPING_STRATEGIES.discard("broker-env")
@@ -126,12 +120,22 @@ def test_python_strategy_env_includes_openalgo_broker(monkeypatch, tmp_path):
     monkeypatch.setattr(ps_module, "save_configs", lambda: None)
     monkeypatch.setattr(ps_module, "LOGS_DIR", Path(tmp_path))
 
+    # The config belongs to the broker that starts it. A shared map used to
+    # make a config written with no broker visible inside fyers.
     with broker_context("fyers"):
-        success, msg = ps_module.start_strategy_process("broker-env")
+        ps_module.STRATEGY_CONFIGS["broker-env"] = {
+            "name": "BrokerEnv",
+            "file_path": str(strat),
+            "user_id": "bob",
+            "exchange": "NSE",
+        }
+        try:
+            success, msg = ps_module.start_strategy_process("broker-env")
+        finally:
+            ps_module.STRATEGY_CONFIGS.pop("broker-env", None)
+            ps_module.RUNNING_STRATEGIES.pop("broker-env", None)
     assert success, msg
     assert captured_env.get("OPENALGO_BROKER") == "fyers"
-    # Clean up registry so other tests are not affected.
-    ps_module.RUNNING_STRATEGIES.pop("broker-env", None)
 
 
 def test_openscript_spawn_env_includes_openalgo_broker(monkeypatch, tmp_path):
