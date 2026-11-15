@@ -1,3 +1,4 @@
+from utils.profile import is_cloud_profile
 from flask import Blueprint
 from flask_restx import Api
 
@@ -71,8 +72,10 @@ api.add_namespace(cancel_all_order_ns, path="/cancelallorder")
 api.add_namespace(quotes_ns, path="/quotes")
 api.add_namespace(multiquotes_ns, path="/multiquotes")
 api.add_namespace(history_ns, path="/history")
-api.add_namespace(portfolio_ns, path="/portfolio")
-api.add_namespace(sip_ns, path="/sip")
+if not is_cloud_profile():
+    api.add_namespace(portfolio_ns, path="/portfolio")
+if not is_cloud_profile():
+    api.add_namespace(sip_ns, path="/sip")
 api.add_namespace(sector_rotation_ns, path="/sectorrotation")
 api.add_namespace(depth_ns, path="/depth")
 api.add_namespace(option_chain_ns, path="/optionchain")

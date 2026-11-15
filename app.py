@@ -1,5 +1,6 @@
 # Load and check environment variables before anything else
 from utils.env_check import load_and_check_env_variables  # Import the environment check function
+from utils.profile import is_cloud_profile
 
 load_and_check_env_variables()
 
@@ -291,8 +292,9 @@ def create_app():
     # portfolio feature never uses -- every chart is drawn in the browser.
     # Warming here means the first backtest does not pay it and boot does not
     # block on it.
-    from portfolio import warm_analytics
-    warm_analytics()
+    if not is_cloud_profile():
+        from portfolio import warm_analytics
+        warm_analytics()
 
     # Exempt API endpoints from CSRF protection (they use API key authentication)
     csrf.exempt(api_v1_bp)
@@ -339,7 +341,10 @@ def create_app():
     app.register_blueprint(playground_bp)  # Register API playground blueprint
     app.register_blueprint(logging_bp)  # Register Logging blueprint
     app.register_blueprint(admin_bp)  # Register Admin blueprint
-    app.register_blueprint(historify_bp)  # Register Historify blueprint
+    if not is_cloud_profile():
+        app.register_blueprint(historify_bp)  # Register Historify blueprint
+    else:
+        logger.info("OPENALGO_PROFILE=cloud: Historify blueprint not registered")
     app.register_blueprint(ivchart_bp)  # Register IV chart blueprint
     app.register_blueprint(scalping_bp)  # Register Scalping terminal blueprint
     app.register_blueprint(watchlist_bp)  # Register charting watchlist blueprint
@@ -903,7 +908,11 @@ def setup_environment(app):
                 ("Chart Prefs DB", ensure_chart_prefs_tables_exists),
                 ("Market Calendar DB", ensure_market_calendar_tables_exists),
                 ("Qty Freeze DB", ensure_qty_freeze_tables_exists),
-                ("Historify DB", ensure_historify_tables_exists),
+                *(
+                    [("Historify DB", ensure_historify_tables_exists)]
+                    if not is_cloud_profile()
+                    else []
+                ),
                 ("Flow DB", ensure_flow_tables_exists),
                 ("Scalping DB", ensure_scalping_tables_exists),
                 ("Watchlist DB", ensure_watchlist_tables_exists),
@@ -1059,13 +1068,16 @@ def setup_environment(app):
             except Exception:
                 logger.exception("Failed to reconcile Flow scheduler jobs")
 
-            try:
-                from services.historify_scheduler_service import init_historify_scheduler
+            if not is_cloud_profile():
+                try:
+                    from services.historify_scheduler_service import init_historify_scheduler
 
-                init_historify_scheduler(socketio=socketio)
-                logger.debug("Historify scheduler initialized")
-            except Exception as e:
-                logger.error(f"Failed to initialize Historify scheduler: {e}")
+                    init_historify_scheduler(socketio=socketio)
+                    logger.debug("Historify scheduler initialized")
+                except Exception as e:
+                    logger.error(f"Failed to initialize Historify scheduler: {e}")
+            else:
+                logger.info("OPENALGO_PROFILE=cloud: Historify scheduler not started")
 
             try:
                 # Multi-leg options strategies with end-to-end risk management.
