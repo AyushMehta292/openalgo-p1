@@ -54,6 +54,49 @@ def _day_m2m(auth_token):
     return realised, unrealised
 
 
+def classify_auth_token(auth_token) -> str:
+    """Ask Groww whether this access token is still accepted.
+
+    Returns ``accepted``, ``rejected``, or ``unchecked``. Groww has no refresh
+    token in this tree. A transport failure or a rate-limit hold is
+    ``unchecked``.
+    """
+    if not auth_token:
+        return "unchecked"
+    url = "https://api.groww.in/v1/margins/detail/user"
+    headers = {
+        "Accept": "application/json",
+        "Authorization": f"Bearer {auth_token}",
+        "X-API-VERSION": "1.0",
+    }
+    try:
+        response = groww_request(
+            get_httpx_client(), "GET", url, "non_trading", headers=headers, timeout=30
+        )
+    except BrokerBusyError:
+        logger.warning("Groww funds check was rate limited")
+        return "unchecked"
+    except httpx.RequestError:
+        logger.warning("Groww funds check did not reach the broker")
+        return "unchecked"
+    except Exception:
+        logger.exception("Groww funds check failed before a broker answer")
+        return "unchecked"
+    if response.status_code in (429, 500, 502, 503, 504):
+        return "unchecked"
+    if response.status_code in (401, 403):
+        return "rejected"
+    try:
+        payload = response.json()
+    except Exception:
+        return "unchecked" if response.status_code >= 500 else "rejected"
+    if response.status_code == 200 and payload.get("status") == "SUCCESS":
+        return "accepted"
+    if response.status_code >= 400 or payload.get("status") not in (None, "SUCCESS"):
+        return "rejected"
+    return "unchecked"
+
+
 def get_margin_data(auth_token):
     """Fetch margin data directly from Groww API using the provided auth token."""
     logger.info("Getting margin data; auth_token_present=%s", bool(auth_token))

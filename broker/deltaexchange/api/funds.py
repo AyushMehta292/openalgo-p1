@@ -80,6 +80,48 @@ def _get_positions_pnl(api_key, api_secret):
         return 0.0, 0.0
 
 
+def classify_auth_token(auth_token) -> str:
+    """Ask Delta Exchange whether this api key is still accepted.
+
+    Returns ``accepted``, ``rejected``, or ``unchecked``. Delta has no refresh
+    token in this tree. A missing secret is not a rejection: the request was
+    never sent. Transport failures and rate limits are ``unchecked``.
+    """
+    api_key = auth_token
+    api_secret = os.getenv("BROKER_API_SECRET", "")
+    if not api_key or not api_secret:
+        logger.info("Delta token check skipped: api key or secret is missing")
+        return "unchecked"
+    path = "/v2/wallet/balances"
+    try:
+        consume(path, method="GET", bucket=PRIVATE)
+        headers = get_auth_headers(
+            method="GET",
+            path=path,
+            query_string="",
+            payload="",
+            api_key=api_key,
+            api_secret=api_secret,
+        )
+        response = get_httpx_client().get(BASE_URL + path, headers=headers, timeout=30.0)
+    except Exception:
+        logger.warning("Delta funds check did not reach the broker", exc_info=True)
+        return "unchecked"
+    if response.status_code in (429, 500, 502, 503, 504):
+        return "unchecked"
+    if response.status_code in (401, 403):
+        return "rejected"
+    try:
+        payload = response.json()
+    except Exception:
+        return "unchecked" if response.status_code >= 500 else "rejected"
+    if response.status_code == 200 and payload.get("success") is True:
+        return "accepted"
+    if response.status_code >= 400 or payload.get("success") is False:
+        return "rejected"
+    return "unchecked"
+
+
 def get_margin_data(auth_token):
     """
     Fetch wallet balance from Delta Exchange and return it in OpenAlgo margin format.

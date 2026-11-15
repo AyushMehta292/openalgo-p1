@@ -25,6 +25,44 @@ INITIAL_BACKOFF = 30  # seconds - first backoff after 429
 MAX_BACKOFF = 120  # seconds - maximum backoff duration
 
 
+def classify_auth_token(auth_token: str) -> str:
+    """Ask Fyers whether this access token is still accepted.
+
+    Returns ``accepted``, ``rejected``, or ``unchecked``. A missing app key, a
+    rate limit, or a transport failure is ``unchecked`` and must not be treated
+    as the broker rejecting the token. This does not redeem ``refresh_token``:
+    the documented token exchange only accepts ``grant_type=authorization_code``.
+    """
+    api_key = os.getenv("BROKER_API_KEY")
+    if not api_key or not auth_token:
+        logger.info("Fyers token check skipped: app key or token is missing")
+        return "unchecked"
+    headers = {"Authorization": f"{api_key}:{auth_token}", "Content-Type": "application/json"}
+    try:
+        response = get_httpx_client().get(
+            "https://api-t1.fyers.in/api/v3/funds", headers=headers, timeout=30.0
+        )
+    except httpx.RequestError:
+        logger.warning("Fyers funds check did not reach the broker")
+        return "unchecked"
+    except Exception:
+        logger.exception("Fyers funds check failed before a broker answer")
+        return "unchecked"
+    if response.status_code in (429, 500, 502, 503, 504):
+        return "unchecked"
+    try:
+        payload = response.json()
+    except Exception:
+        return "unchecked" if response.status_code >= 500 else "rejected"
+    if response.status_code == 200 and payload.get("code") == 200:
+        return "accepted"
+    if response.status_code in (401, 403) or payload.get("code") not in (None, 200):
+        return "rejected"
+    if response.status_code >= 400:
+        return "rejected"
+    return "unchecked"
+
+
 def get_margin_data(auth_token: str) -> dict[str, str]:
     """
     Fetch and process margin/funds data from Fyers' API using shared HTTP client with connection pooling.
