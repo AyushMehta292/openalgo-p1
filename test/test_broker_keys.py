@@ -1829,8 +1829,14 @@ def test_a_logged_in_crypto_broker_keeps_its_session_past_the_rollover(
     keys_db.save_broker_keys("deltaexchange", {"api_key": "d-key", "api_secret": "d-sec"}, None)
     broker_keys.forget_logged_in_broker()
 
-    broker_keys.use_broker_keys("deltaexchange")
-    assert os.environ["BROKER_API_KEY"] == "d-key"
+    published = broker_keys.use_broker_keys("deltaexchange")
+    # The process holds the published key. With no broker selected, a read
+    # through os.environ follows that rule and does not hand the key out:
+    # an unset selection yields an empty value, not the saved Delta key.
+    assert published.api_key == "d-key"
+    assert broker_keys._process_value("BROKER_API_KEY") == "d-key"
+    assert os.environ["BROKER_API_KEY"] == ""
+    assert "BROKER_API_KEY_MARKET" not in os.environ or os.environ["BROKER_API_KEY_MARKET"] == ""
     assert is_session_expiry_disabled() is False
 
     _logged_in("deltaexchange")
