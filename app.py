@@ -508,8 +508,61 @@ def create_app():
         # NOTE: Python strategy scheduler is initialized in setup_environment()
         # AFTER database tables are created, to avoid "no such table" errors on fresh install
 
-        # NOTE: Telegram bot auto-start moved to background init thread
-        # (after DB tables are created) to avoid "no such table" on fresh install
+        # Telegram and scalping start from the first request that selects a
+        # broker, after db_ready, so boot does not open a broker database.
+
+    _broker_services_started: set[str] = set()
+    _broker_services_lock = _th.Lock()
+
+    def _start_services_for_selected_broker() -> None:
+        """Open broker databases only after this request has selected a broker.
+
+        Scalping stops and the Telegram bot are per broker. Starting them
+        during boot has no request, and a fresh thread does not keep the
+        broker the caller entered, so both wait for a request and re-enter
+        that broker on their own thread.
+        """
+        from utils.broker_context import BROKERS, broker_context, current_broker
+
+        broker = current_broker()
+        if broker not in BROKERS:
+            return
+        with _broker_services_lock:
+            if broker in _broker_services_started:
+                return
+            _broker_services_started.add(broker)
+
+        def _run() -> None:
+            if hasattr(app, "db_ready"):
+                app.db_ready.wait(timeout=30)
+            with app.app_context():
+                with broker_context(broker):
+                    try:
+                        from services.scalping_risk_monitor_service import (
+                            start_scalping_risk_monitor,
+                        )
+
+                        start_scalping_risk_monitor()
+                    except Exception:
+                        logger.exception("Failed to initialize Scalping risk monitor")
+                    try:
+                        bot_config = get_bot_config()
+                        if bot_config.get("is_active") and bot_config.get("bot_token"):
+                            success, message = telegram_bot_service.initialize_bot_sync(
+                                token=bot_config["bot_token"]
+                            )
+                            if success:
+                                success, message = telegram_bot_service.start_bot()
+                                if not success:
+                                    logger.error(f"Failed to auto-start Telegram bot: {message}")
+                            else:
+                                logger.error(f"Failed to initialize Telegram bot: {message}")
+                    except Exception:
+                        logger.exception("Error auto-starting Telegram bot")
+
+        _th.Thread(
+            target=_run, name=f"broker-services-{broker}", daemon=True
+        ).start()
 
     @app.before_request
     def bind_tab_broker():
@@ -538,6 +591,7 @@ def create_app():
             return
         g._tab_state = {"broker": broker}
         g._broker_token = push_broker(broker)
+        _start_services_for_selected_broker()
 
     @app.teardown_request
     def release_tab_broker(_exc=None):
@@ -1024,16 +1078,9 @@ def setup_environment(app):
             except Exception as e:
                 logger.error(f"Failed to initialize Strategy module: {e}")
 
-            try:
-                # Server-side scalping SL / target / trailing-stop engine. Runs
-                # browser-independently so stops keep working after the user
-                # leaves /scalping or closes the tab. Idles when no SL is set.
-                from services.scalping_risk_monitor_service import start_scalping_risk_monitor
-
-                start_scalping_risk_monitor()
-                logger.debug("Scalping risk monitor initialized")
-            except Exception as e:
-                logger.error(f"Failed to initialize Scalping risk monitor: {e}")
+            # Scalping stops and the Telegram bot open a broker database.
+            # They start from the first request that has selected a broker,
+            # not from this boot thread.
 
             # Auto-reconnect the WhatsApp bot if a paired session is persisted.
             # Without this, every server restart would leave is_ready()=False
@@ -1108,29 +1155,6 @@ def setup_environment(app):
                 logger.debug("Downtime resume checked")
             except Exception:
                 logger.exception("Downtime resume failed")
-
-            # Auto-start Telegram bot if it was active (after DB tables exist).
-            # initialize_bot_sync is the one entry point: which validation path
-            # it takes for this runtime is the service's decision, so this
-            # block no longer inspects the runtime or builds an event loop.
-            try:
-                bot_config = get_bot_config()
-                if bot_config.get("is_active") and bot_config.get("bot_token"):
-                    logger.debug("Auto-starting Telegram bot (background)...")
-
-                    success, message = telegram_bot_service.initialize_bot_sync(
-                        token=bot_config["bot_token"]
-                    )
-                    if success:
-                        success, message = telegram_bot_service.start_bot()
-                        if success:
-                            logger.debug(f"Telegram bot auto-started successfully: {message}")
-                        else:
-                            logger.error(f"Failed to auto-start Telegram bot: {message}")
-                    else:
-                        logger.error(f"Failed to initialize Telegram bot: {message}")
-            except Exception as e:
-                logger.error(f"Error auto-starting Telegram bot: {e}")
 
     threading.Thread(target=_init_databases_and_schedulers, daemon=True).start()
 
