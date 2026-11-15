@@ -885,5 +885,4 @@ def cleanup_db():
     db_session.remove()
 
 
-# Initialize database on module load
-init_db()
+# Tables are created per broker during startup, inside that broker's context.

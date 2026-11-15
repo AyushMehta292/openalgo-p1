@@ -5,7 +5,7 @@ import os
 import pyotp
 from argon2 import PasswordHasher
 from argon2.exceptions import VerifyMismatchError
-from sqlalchemy import Boolean, Column, Integer, String, create_engine
+from sqlalchemy import Boolean, Column, DateTime, Integer, String, create_engine
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import scoped_session, sessionmaker
@@ -19,8 +19,10 @@ logger = get_logger(__name__)
 # Initialize Argon2 hasher
 ph = PasswordHasher()
 
-# Database connection details
-DATABASE_URL = os.getenv("DATABASE_URL")
+# The administrator is one for the process, not one per broker.
+from utils.broker_context import database_url_for_module
+
+DATABASE_URL = database_url_for_module(os.getenv("DATABASE_URL"))
 
 # Security: Require API_KEY_PEPPER environment variable (fail fast if missing)
 # Pepper must be at least 32 bytes (64 hex characters) for cryptographic security
@@ -144,6 +146,15 @@ class User(Base):
         """Verify TOTP token"""
         totp = pyotp.TOTP(self.get_totp_secret())
         return totp.verify(token)
+
+
+class SessionRevocation(Base):
+    """Process-wide end of an OpenAlgo sign-in. One administrator, every broker."""
+
+    __tablename__ = "session_revocations"
+    username = Column(String(255), primary_key=True)
+    revoked_at = Column(DateTime, nullable=False)
+    pre_broker_revoked_at = Column(DateTime, nullable=True)
 
 
 def init_db():

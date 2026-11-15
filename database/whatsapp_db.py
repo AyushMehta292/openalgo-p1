@@ -957,6 +957,5 @@ def add_notification(
         db_session.remove()
 
 
-# Auto-initialize on first import — matches database/telegram_db.py:858
-# behavior so the tables exist as soon as any caller pulls in this module.
-init_db()
+# Tables are created per broker during startup, inside that broker's context.
+# Import-time init would open SQLite before any broker is selected.

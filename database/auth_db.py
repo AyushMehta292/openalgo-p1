@@ -581,13 +581,23 @@ def _revocations(username):
 
     def _load():
         try:
-            row = SessionRevocation.query.filter_by(username=username).first()
+            from database.user_db import SessionRevocation as SharedRevocation
+            from database.user_db import db_session as shared_session
+
+            row = shared_session.query(SharedRevocation).filter_by(username=username).first()
             if row is None:
                 return (None, None)
             return (_aware(row.revoked_at), _aware(row.pre_broker_revoked_at))
         except Exception:
             logger.exception("Could not read when sessions were last ended")
             return MISSING
+        finally:
+            try:
+                from database.user_db import db_session as shared_session
+
+                shared_session.remove()
+            except Exception:
+                pass
 
     return _session_revocation_cache.get_or_load(
         username, _load, should_cache=lambda v: v is not MISSING
@@ -661,29 +671,38 @@ def _record_revocation(username, field):
     from datetime import UTC
 
     from database.broker_keys_db import clear_login_states
+    from database.user_db import SessionRevocation as SharedRevocation
+    from database.user_db import db_session as shared_session
 
     # Under the commit guard: a login whose final checks pass stores its token
     # before this sign-out is recorded, or sees it and stores nothing.
+    # The revocation itself is process-wide (one administrator), in the shared
+    # database. Pending broker logins are cancelled in every broker directory.
     with _commit_lock:
         now = datetime.now(UTC).replace(tzinfo=None)
         try:
-            row = SessionRevocation.query.filter_by(username=username).first()
+            row = shared_session.query(SharedRevocation).filter_by(username=username).first()
             if row is None:
-                row = SessionRevocation(username=username, revoked_at=_NEVER)
-                db_session.add(row)
+                row = SharedRevocation(username=username, revoked_at=_NEVER)
+                shared_session.add(row)
             setattr(row, field, now)
-            db_session.commit()
+            shared_session.commit()
             recorded = True
         except Exception:
-            db_session.rollback()
+            shared_session.rollback()
             logger.exception("Could not record the end of the sessions")
             recorded = False
         finally:
             _session_revocation_cache.invalidate(username)
-        # A broker login started from an ended sign-in must not complete: it
-        # would sign the browser back in (the XTS brokers answer without the
-        # cookie).
-        clear_login_states()
+            shared_session.remove()
+        from utils.broker_context import BROKERS, broker_context
+
+        for broker_name in BROKERS:
+            try:
+                with broker_context(broker_name):
+                    clear_login_states()
+            except Exception:
+                logger.exception("Could not clear pending logins for %s", broker_name)
     return recorded
 
 
