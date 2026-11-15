@@ -702,12 +702,12 @@ def handle_auth_success(auth_token, user_session_key, broker, feed_token=None, u
             return redirect(url_for("auth.broker_login"))
         logger.info(f"Database record upserted with ID: {inserted_id}")
 
-        # One broker at a time: the session of the broker logged in before ends
-        # on every other device, in the same commit as this one is stored.
+        # Fyers, Delta Exchange and Groww stay logged in together, one per tab.
+        # Storing this broker does not end another broker's session or its exits.
         if previous and previous != broker:
-            from blueprints.auth import end_broker_session_for_switch
-
-            end_broker_session_for_switch(user_session_key, previous, broker, after=after)
+            logger.info(
+                f"Left the {previous} session in place while storing the {broker} login"
+            )
 
         # This browser's sign-in dates from this commit, so a sign-out after it
         # ends it, a session the XTS post-back opens without a cookie included.
