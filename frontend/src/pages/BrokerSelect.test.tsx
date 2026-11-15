@@ -235,8 +235,7 @@ describe('Login with a broker', () => {
   })
 })
 
-// One broker at a time: logging in to another is confirmed first, and the
-// server ends the live session only when the new sign-in completes.
+// Each broker stays logged in. Starting another does not ask to end the first.
 describe('Login while another broker is logged in', () => {
   beforeEach(() => {
     list = brokerList([
@@ -245,30 +244,12 @@ describe('Login while another broker is logged in', () => {
     ])
   })
 
-  it('asks first, and Cancel ends nothing and starts nothing', async () => {
+  it('starts the other broker without asking to end the one already logged in', async () => {
     serve()
     renderPage()
     fireEvent.click((await card('fyers')).getByRole('button', { name: 'Login with Fyers' }))
-    expect(await screen.findByText('End your Zerodha session?')).toBeInTheDocument()
-    expect(
-      screen.getByText(
-        /Signing in to Fyers ends your Zerodha session. Open positions and orders stay with Zerodha./
-      )
-    ).toBeInTheDocument()
-    fireEvent.click(screen.getByRole('button', { name: 'Cancel' }))
-    await waitFor(() => expect(screen.queryByText('End your Zerodha session?')).toBeNull())
-    expect(posts).toEqual([])
-    expect(assigned).toEqual([])
-  })
-
-  it('starts the new sign-in without ending the live session', async () => {
-    serve()
-    renderPage()
-    fireEvent.click((await card('fyers')).getByRole('button', { name: 'Login with Fyers' }))
-    expect(await screen.findByText(/if it does not, Zerodha stays connected/)).toBeInTheDocument()
-    fireEvent.click(await screen.findByRole('button', { name: 'Log in to Fyers' }))
+    expect(screen.queryByText('End your Zerodha session?')).toBeNull()
     await waitFor(() => expect(assigned).toEqual(['https://broker.example/fyers/login?state=s']))
-    // Only the start: the server ends Zerodha's session when Fyers' sign-in completes.
     expect(posts.map((p) => p.url)).toEqual(['/auth/broker/login'])
   })
 
@@ -311,12 +292,10 @@ describe('Switching truthfully', () => {
     ])
     serve({ loseStartReply: true })
     renderPage()
+    const readsBefore = listReads
     fireEvent.click(
       (await card('fivepaisaxts')).getByRole('button', { name: 'Login with 5 Paisa (XTS)' })
     )
-    const confirm = await screen.findByRole('button', { name: 'Log in to 5 Paisa (XTS)' })
-    const readsBefore = listReads
-    fireEvent.click(confirm)
     expect(
       await (await card('fivepaisaxts')).findByText('Could not reach OpenAlgo. Try again.')
     ).toBeInTheDocument()

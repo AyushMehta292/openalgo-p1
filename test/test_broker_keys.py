@@ -610,13 +610,12 @@ def test_the_list_names_the_logged_in_broker_and_why_it_cannot_switch(
     environment.write(ENV_ZERODHA)
     _save_fyers()
     _logged_in("zerodha")
-    monkeypatch.setattr(broker_switch, "_blockers", lambda username: (0, 1, 0, 0))
-
     data, brokers = _listed(_signed_in(_app()))
 
     assert data["logged_in"] == "zerodha"
     assert brokers["zerodha"]["active"] and not brokers["fyers"]["active"]
-    assert data["switch_refusal"].startswith("Zerodha still has 1 running Live OpenScript run.")
+    # Another broker's work does not block login from this page.
+    assert data["switch_refusal"] is None
 
 
 @pytest.mark.parametrize(
@@ -1733,15 +1732,14 @@ def _commit(broker, token="new-token", path="/", **session_values):
         return answer, dict(session)
 
 
-def test_a_completed_login_to_another_broker_ends_the_live_session(
+def test_a_completed_login_to_another_broker_leaves_the_other_sign_in(
     stores, environment, commit
 ):
-    """Desktop parity: the old session ends when the new login completes, on
-    every device; the browser that logged in stays signed in, on the new one."""
-    environment.write(ENV_ZERODHA)
+    """Fyers, Delta Exchange and Groww stay logged in together. Storing a
+    login does not sign other browsers out or emit a forced logout."""
+    environment.write({})
     _save_fyers()
     _logged_in("zerodha")
-    broker_keys.use_broker_keys("zerodha")
     app = _app()
     other_device = _signed_in(app, logged_in=True, login_time=datetime.now(IST).isoformat())
 
@@ -1754,10 +1752,8 @@ def test_a_completed_login_to_another_broker_ends_the_live_session(
         False,
         "fy-token",
     )
-    assert broker_keys.live_broker() == "fyers"
-    assert os.environ["BROKER_API_KEY"] == "FYAPP-100"
-    assert _probe(other_device) == 401
-    assert "force_logout" in commit
+    assert _probe(other_device) == 200
+    assert "force_logout" not in commit
     with app.test_request_context("/"):
         from flask import session
 
@@ -1794,23 +1790,23 @@ def test_a_failed_store_leaves_the_logged_in_broker_connected(
     assert "logged_in" not in this_session
 
 
-def test_a_login_that_would_strand_live_automation_does_not_complete(
+def test_live_automation_on_another_broker_does_not_refuse_login(
     stores, environment, commit, monkeypatch
 ):
-    """Checked again when the login completes: the old broker stays logged in,
-    and the trader is sent back to its card with the reason."""
+    """Each tab logs in on its own. Live automation on the broker already
+    logged in does not refuse the other broker, and the new login is stored."""
     environment.write(ENV_ZERODHA)
     _save_fyers()
     _logged_in("zerodha")
     monkeypatch.setattr(broker_switch, "_blockers", lambda username: (2, 0, 0, 0))
 
     refusal = broker_switch.refusal_for_login("fyers", USER)
-    answer, _ = _commit("fyers", path="/fyers/callback")
+    answer, _ = _commit("fyers", "fy-token", path="/fyers/callback")
 
-    assert refusal.startswith("Zerodha still has 2 running Live strategies.")
-    assert answer.headers["Location"] == "/broker?error=switch_refused&broker=fyers"
-    assert broker_keys.live_broker() == "zerodha"
-    assert auth_db.Auth.query.filter_by(name=USER).one().broker == "zerodha"
+    assert refusal is None
+    assert answer.status_code == 302
+    assert broker_keys.live_broker() == "fyers"
+    assert auth_db.Auth.query.filter_by(name=USER).one().broker == "fyers"
 
 
 def test_a_logged_in_crypto_broker_keeps_its_session_past_the_rollover(

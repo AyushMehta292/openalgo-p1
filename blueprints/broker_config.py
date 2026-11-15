@@ -121,7 +121,6 @@ def list_brokers():
     """Every broker, what is saved for it (masked), and which one is logged in."""
     from database.broker_keys_db import list_broker_keys
     from utils.broker_keys import enabled_brokers, env_broker, env_file_values, live_broker
-    from utils.broker_switch import switch_refusal
 
     env_values = env_file_values()
     env_name = env_broker(env_values)
@@ -132,7 +131,9 @@ def list_brokers():
         {
             "data": {
                 "logged_in": live,
-                "switch_refusal": switch_refusal(live, session["user"]) if live else None,
+                # Another broker's strategies, or a failed check of that broker,
+                # do not block login from this page. Each tab names its broker.
+                "switch_refusal": None,
                 "brokers": brokers,
             }
         }

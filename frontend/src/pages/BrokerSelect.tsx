@@ -10,7 +10,6 @@ import {
   sortBrokers,
 } from '@/api/broker-config'
 import { BrokerAuthSignOut } from '@/components/auth/BrokerAuthSignOut'
-import { BrokerSwitchConfirm } from '@/components/auth/BrokerSwitchConfirm'
 import { Alert, AlertDescription } from '@/components/ui/alert'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
@@ -19,7 +18,6 @@ import { Input } from '@/components/ui/input'
 import {
   BROKER_SETUP_PATH,
   brokerConfigPath,
-  fetchLiveBroker,
   resumeBrokerSession,
   startBrokerLogin,
 } from '@/lib/brokerProfiles'
@@ -92,7 +90,6 @@ export default function BrokerSelect() {
   const [cardError, setCardError] = useState<{ broker: string; message: string } | null>(null)
   const [pageError, setPageError] = useState<string | null>(null)
   // A login waiting for the trader to confirm ending the live session.
-  const [pendingLogin, setPendingLogin] = useState<{ from: string; to: string } | null>(null)
 
   const list = useQuery({
     queryKey: ['broker-list'],
@@ -126,8 +123,6 @@ export default function BrokerSelect() {
     if (!q) return brokers
     return brokers.filter((b) => b.name.toLowerCase().includes(q) || b.id.includes(q))
   }, [brokers, filter])
-  const nameOf = (id: string) => brokers.find((b) => b.id === id)?.name ?? id
-
   // A card error for a broker that is not listed shows at the top instead.
   useEffect(() => {
     if (cardError && list.data && !list.data.brokers.some((b) => b.id === cardError.broker)) {
@@ -158,32 +153,15 @@ export default function BrokerSelect() {
     window.location.href = started.url
   }
 
-  // One broker at a time. Logging in to another is confirmed first; the
-  // server ends the live session only when the new sign-in completes, so
-  // one that fails or is abandoned leaves the logged-in broker connected.
+  // Each tab logs in to its own broker. Starting Delta Exchange or Groww
+  // does not end Fyers, and does not ask to.
   const handleLogin = async (broker: BrokerEntry) => {
-    const live = await fetchLiveBroker(list.data?.logged_in ?? null)
-    if (live && live !== broker.id) {
-      // Live automation or unsettled orders on the logged-in broker refuse
-      // the switch outright (the server enforces it too): say why instead
-      // of offering the confirm.
-      const refusal = list.data?.switch_refusal
-      if (refusal) {
-        setCardError({ broker: broker.id, message: refusal })
-        await refresh()
-        return
-      }
-      setPendingLogin({ from: live, to: broker.id })
+    const refusal = list.data?.switch_refusal
+    if (refusal) {
+      setCardError({ broker: broker.id, message: refusal })
+      await refresh()
       return
     }
-    await startSignIn(broker)
-  }
-
-  const confirmLogin = async () => {
-    const pending = pendingLogin
-    setPendingLogin(null)
-    const broker = brokers.find((b) => b.id === pending?.to)
-    if (!pending || !broker) return
     await startSignIn(broker)
   }
 
@@ -359,12 +337,6 @@ export default function BrokerSelect() {
         </div>
       </div>
 
-      <BrokerSwitchConfirm
-        from={pendingLogin ? nameOf(pendingLogin.from) : null}
-        to={pendingLogin ? nameOf(pendingLogin.to) : ''}
-        onCancel={() => setPendingLogin(null)}
-        onConfirm={confirmLogin}
-      />
     </div>
   )
 }
