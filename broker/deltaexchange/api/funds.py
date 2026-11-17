@@ -110,6 +110,9 @@ def classify_auth_token(auth_token) -> str:
     if response.status_code in (429, 500, 502, 503, 504):
         return "unchecked"
     if response.status_code in (401, 403):
+        if "ip_not_whitelisted_for_api_key" in (response.text or ""):
+            logger.info("Delta funds check hit IP whitelist on current IP; leaving token in place")
+            return "unchecked"
         return "rejected"
     try:
         payload = response.json()
