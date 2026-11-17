@@ -1406,6 +1406,96 @@ def invalidate_user_auth_cache(name) -> list[str]:
     return cleared
 
 
+def _sync_api_key_row_across_brokers(user_id, hashed_key, encrypted_key, order_mode=None):
+    """Ensure the platform API key row exists in every broker database."""
+    try:
+        from utils.broker_context import (
+            BROKERS,
+            broker_context,
+            current_broker,
+            env_points_at_project_db,
+        )
+
+        if not env_points_at_project_db():
+            return
+        active = current_broker()
+        for broker_name in BROKERS:
+            if broker_name == active:
+                continue
+            try:
+                with broker_context(broker_name):
+                    row = ApiKeys.query.filter_by(user_id=user_id).first()
+                    if row:
+                        row.api_key_hash = hashed_key
+                        row.api_key_encrypted = encrypted_key
+                        if order_mode is not None:
+                            row.order_mode = order_mode
+                    else:
+                        row = ApiKeys(
+                            user_id=user_id,
+                            api_key_hash=hashed_key,
+                            api_key_encrypted=encrypted_key,
+                            order_mode=order_mode or "auto",
+                        )
+                        db_session.add(row)
+                    db_session.commit()
+            except Exception:
+                db_session.rollback()
+                logger.debug("Could not sync API key to broker %s", broker_name, exc_info=True)
+    except Exception:
+        logger.debug("Could not run cross-broker API key sync", exc_info=True)
+
+
+def _backfill_api_key_from_other_brokers(user_id=None):
+    """If the current broker DB has no api_keys row, copy it from a sibling broker DB."""
+    try:
+        from utils.broker_context import (
+            BROKERS,
+            broker_context,
+            current_broker,
+            env_points_at_project_db,
+        )
+
+        active = current_broker()
+        if not env_points_at_project_db() or active not in BROKERS:
+            return None
+        donor = None
+        for broker_name in BROKERS:
+            if broker_name == active:
+                continue
+            try:
+                with broker_context(broker_name):
+                    q = ApiKeys.query
+                    row = q.filter_by(user_id=user_id).first() if user_id else q.first()
+                    if row and row.api_key_hash and row.api_key_encrypted:
+                        donor = (
+                            row.user_id,
+                            row.api_key_hash,
+                            row.api_key_encrypted,
+                            row.order_mode or "auto",
+                        )
+                        break
+            except Exception:
+                continue
+        if donor is None:
+            return None
+        uid, hsh, enc, mode = donor
+        existing = ApiKeys.query.filter_by(user_id=uid).first()
+        if existing is None:
+            existing = ApiKeys(
+                user_id=uid,
+                api_key_hash=hsh,
+                api_key_encrypted=enc,
+                order_mode=mode,
+            )
+            db_session.add(existing)
+            db_session.commit()
+        return existing
+    except Exception:
+        db_session.rollback()
+        return None
+
+
 def upsert_api_key(user_id, api_key):
     """Store both hashed and encrypted API key"""
     # Hash with Argon2 for verification
@@ -1425,17 +1515,23 @@ def upsert_api_key(user_id, api_key):
         )
         db_session.add(api_key_obj)
     db_session.commit()
+    key_id = api_key_obj.id
+    order_mode = api_key_obj.order_mode or "auto"
+
+    _sync_api_key_row_across_brokers(user_id, hashed_key, encrypted_key, order_mode)
 
     # Security: Invalidate all caches when API key changes
     invalidate_user_cache(user_id)
 
-    return api_key_obj.id
+    return key_id
 
 
 def get_api_key(user_id):
     """Check if user has an API key"""
     try:
         api_key_obj = ApiKeys.query.filter_by(user_id=user_id).first()
+        if api_key_obj is None:
+            api_key_obj = _backfill_api_key_from_other_brokers(user_id)
         return api_key_obj is not None
     except Exception as e:
         logger.exception(f"Error while querying the database for API key: {e}")
@@ -1446,6 +1542,8 @@ def get_api_key_for_tradingview(user_id):
     """Get decrypted API key for TradingView configuration"""
     try:
         api_key_obj = ApiKeys.query.filter_by(user_id=user_id).first()
+        if api_key_obj is None:
+            api_key_obj = _backfill_api_key_from_other_brokers(user_id)
         if api_key_obj and api_key_obj.api_key_encrypted:
             return decrypt_token(api_key_obj.api_key_encrypted)
         return None

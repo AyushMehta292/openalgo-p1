@@ -777,6 +777,15 @@ def delete_fyers_temp_data(output_path):
                 logger.warning(f"Error deleting file {file_path}: {e}")
 
 
+def _safe_emit(event: str, payload: dict):
+    """Emit a Socket.IO event without failing when called outside a web/socket context."""
+    try:
+        return socketio.emit(event, payload)
+    except Exception as exc:
+        logger.debug(f"Skipping socketio.emit({event!r}) outside socket context: {exc}")
+        return payload
+
+
 def master_contract_download():
     logger.info("Downloading Master Contract")
 
@@ -792,7 +801,7 @@ def master_contract_download():
         if not downloaded:
             message = f"Master contract download failed, keeping the existing symbols: {download_error}"
             logger.error(message)
-            return socketio.emit(
+            return _safe_emit(
                 "master_contract_download", {"status": "error", "message": message}
             )
 
@@ -817,13 +826,13 @@ def master_contract_download():
 
         # token_df = token_df.drop_duplicates(subset='symbol', keep='first')
 
-        return socketio.emit(
+        return _safe_emit(
             "master_contract_download", {"status": "success", "message": "Successfully Downloaded"}
         )
 
     except Exception as e:
         logger.exception(f"{e}")
-        return socketio.emit("master_contract_download", {"status": "error", "message": f"{e}"})
+        return _safe_emit("master_contract_download", {"status": "error", "message": f"{e}"})
 
 
 def search_symbols(symbol, exchange):

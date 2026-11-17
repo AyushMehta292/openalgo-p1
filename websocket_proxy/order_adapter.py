@@ -23,6 +23,15 @@ from typing import Any
 
 import websocket
 
+try:
+    import certifi
+
+    _CA_CERTS = certifi.where()
+    os.environ.setdefault("SSL_CERT_FILE", _CA_CERTS)
+    os.environ.setdefault("REQUESTS_CA_BUNDLE", _CA_CERTS)
+except Exception:
+    _CA_CERTS = None
+
 from utils.event_bus import bus
 from utils.logging import get_logger
 
@@ -309,8 +318,14 @@ class BaseOrderUpdateAdapter(ABC):
         # strictly less than ping_interval (websocket-client requirement).
         ping_interval = max(2, int(self.ws_ping_interval()))
         ping_timeout = min(10, max(1, ping_interval - 1))
+        sslopt = {"ca_certs": _CA_CERTS} if _CA_CERTS else None
         try:
-            ws.run_forever(ping_interval=ping_interval, ping_timeout=ping_timeout)
+            if sslopt:
+                ws.run_forever(
+                    ping_interval=ping_interval, ping_timeout=ping_timeout, sslopt=sslopt
+                )
+            else:
+                ws.run_forever(ping_interval=ping_interval, ping_timeout=ping_timeout)
         finally:
             # The socket is dead once run_forever returns — clear the handle so
             # `connected` reads False between reconnect attempts and the old

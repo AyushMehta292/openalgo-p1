@@ -846,8 +846,20 @@ class FundManager:
                 logger.error(f"Symbol {symbol} not found on {exchange}")
                 return None, "Symbol not found"
 
-            # Calculate trade value (quantity × price)
-            trade_value = quantity * price
+            # Calculate trade value (quantity × price × contract_value)
+            cv_raw = getattr(symbol_obj, "contract_value", None)
+            if cv_raw is None or float(cv_raw) == 1.0:
+                lot_raw = getattr(symbol_obj, "lotsize", None)
+                try:
+                    if lot_raw is not None and 0 < float(lot_raw) < 1.0:
+                        cv_raw = float(lot_raw)
+                except (TypeError, ValueError):
+                    pass
+            try:
+                cv = Decimal(str(cv_raw)) if cv_raw and float(cv_raw) > 0 else Decimal("1")
+            except Exception:
+                cv = Decimal("1")
+            trade_value = Decimal(str(quantity)) * price * cv
 
             # Determine leverage based on action, product and symbol type
             leverage = self._get_leverage(exchange, product, symbol, action)

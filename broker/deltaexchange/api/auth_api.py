@@ -72,7 +72,25 @@ def authenticate_broker(code):
                 return None, msg
 
         elif response.status_code == 401:
-            msg = "Invalid API key or signature — check BROKER_API_KEY and BROKER_API_SECRET"
+            try:
+                err_obj = (response.json() or {}).get("error") or {}
+            except ValueError:
+                err_obj = {}
+            code_str = err_obj.get("code") if isinstance(err_obj, dict) else None
+            client_ip = (
+                (err_obj.get("context") or {}).get("client_ip")
+                if isinstance(err_obj, dict)
+                else None
+            )
+            if code_str == "ip_not_whitelisted_for_api_key":
+                msg = (
+                    f"Delta Exchange refused login: IP {client_ip or 'current IP'} is not "
+                    "whitelisted for this API key."
+                )
+            elif code_str:
+                msg = f"Delta Exchange refused login ({code_str}) — check BROKER_API_KEY and BROKER_API_SECRET"
+            else:
+                msg = "Invalid API key or signature — check BROKER_API_KEY and BROKER_API_SECRET"
             logger.error(msg)
             return None, msg
 

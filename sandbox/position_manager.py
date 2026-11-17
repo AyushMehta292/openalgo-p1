@@ -336,8 +336,11 @@ class PositionManager:
         Returns 1.0 for normal equity instruments."""
         try:
             sym_info = get_symbol_info(symbol, exchange)
-            if sym_info and sym_info.contract_value and float(sym_info.contract_value) != 1.0:
-                return Decimal(str(sym_info.contract_value))
+            if sym_info:
+                if sym_info.contract_value and float(sym_info.contract_value) != 1.0:
+                    return Decimal(str(sym_info.contract_value))
+                if sym_info.lotsize is not None and 0 < float(sym_info.lotsize) < 1.0:
+                    return Decimal(str(sym_info.lotsize))
         except Exception:
             pass
         return Decimal("1.0")

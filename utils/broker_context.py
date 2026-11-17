@@ -32,6 +32,30 @@ _current: contextvars.ContextVar[str | None] = contextvars.ContextVar(
     "openalgo_broker", default=None
 )
 
+_BROKER_SCOPED_SESSIONS: tuple[tuple[str, str], ...] = (
+    ("database.auth_db", "db_session"),
+    ("database.broker_keys_db", "db_session"),
+    ("database.settings_db", "db_session"),
+    ("database.sandbox_db", "db_session"),
+    ("database.symbol", "db_session"),
+)
+
+
+def _release_broker_db_sessions() -> None:
+    """Release per-broker scoped SQLAlchemy sessions on broker context enter/exit."""
+    import sys
+
+    for module_name, attr in _BROKER_SCOPED_SESSIONS:
+        mod = sys.modules.get(module_name)
+        if mod is None:
+            continue
+        sess = getattr(mod, attr, None)
+        if sess is not None and hasattr(sess, "remove"):
+            try:
+                sess.remove()
+            except Exception:
+                pass
+
 
 class BrokerContextError(RuntimeError):
     """A broker database or broker key was used with no broker selected."""
@@ -57,12 +81,14 @@ def push_broker(broker: str):
     if broker not in BROKERS:
         raise BrokerContextError(f"Unknown broker {broker!r}.")
     (PROJECT_ROOT / "db" / "brokers" / broker).mkdir(parents=True, exist_ok=True)
+    _release_broker_db_sessions()
     return _current.set(broker)
 
 
 def pop_broker(token) -> None:
     """Leave the broker selected by ``push_broker``."""
     if token is not None:
+        _release_broker_db_sessions()
         _current.reset(token)
 
 
@@ -82,20 +108,22 @@ def broker_context(broker: str) -> Iterator[str]:
 def broker_from_http_request(path: str, header: str, query: str, body_broker: str) -> str | None:
     """Which broker this HTTP request is for.
 
-    The header is the per-tab value (sessionStorage). The path and query name
-    a broker on callbacks and on the redirect after login. Nothing here reads
-    the shared session cookie: that cookie is the same in every tab.
+    Explicit targets on the request (callback or credentials path, ``?broker=``
+    query parameter, or ``POST /auth/broker/login`` body) take precedence over
+    the tab's previous ``X-OpenAlgo-Broker`` header so switching or logging in
+    to a different broker in the same tab enters the target broker immediately.
     """
-    for candidate in (header, query, body_broker):
+    parts = [part for part in (path or "").split("/") if part]
+    path_broker = None
+    if parts and parts[0] in BROKERS:
+        path_broker = parts[0]
+    elif len(parts) >= 4 and parts[0] == "api" and parts[1] == "broker" and parts[2] == "credentials":
+        if parts[3] in BROKERS:
+            path_broker = parts[3]
+    for candidate in (path_broker, query, body_broker, header):
         name = (candidate or "").strip().lower()
         if name in BROKERS:
             return name
-    parts = [part for part in (path or "").split("/") if part]
-    if parts and parts[0] in BROKERS:
-        return parts[0]
-    if len(parts) >= 4 and parts[0] == "api" and parts[1] == "broker" and parts[2] == "credentials":
-        if parts[3] in BROKERS:
-            return parts[3]
     return None
 
 
