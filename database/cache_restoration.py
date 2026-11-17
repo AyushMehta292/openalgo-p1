@@ -48,16 +48,23 @@ def restore_symbol_cache() -> dict:
     try:
         from database.auth_db import Auth
         from database.token_db_enhanced import get_cache
+        from utils.broker_context import BROKERS, current_broker
 
-        # Find the active broker from auth table (non-revoked)
+        # Find the active broker from auth table (non-revoked), or fall back
+        # to the current broker context so symtoken is loaded into cache even
+        # before a live login occurs.
         auth_record = Auth.query.filter_by(is_revoked=False).first()
+        ctx_broker = current_broker()
 
-        if not auth_record:
+        if auth_record and auth_record.broker:
+            broker = auth_record.broker
+        elif ctx_broker in BROKERS:
+            broker = ctx_broker
+        else:
             result["error"] = "No active broker session found in database"
             logger.debug("Symbol cache restoration skipped: No active broker session")
             return result
 
-        broker = auth_record.broker
         result["broker"] = broker
 
         # Get the symbol cache instance

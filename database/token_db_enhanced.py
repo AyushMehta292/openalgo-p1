@@ -224,6 +224,32 @@ def _session_timing() -> tuple[datetime, datetime]:
     return now_ist, next_reset
 
 
+def _resolve_contract_value(sym) -> float | None:
+    """Resolve contract multiplier from symtoken contract_value or fractional lotsize."""
+    cv = getattr(sym, "contract_value", None)
+    if cv is not None:
+        try:
+            fcv = float(cv)
+            if fcv > 0 and fcv != 1.0:
+                return fcv
+        except (TypeError, ValueError):
+            pass
+    lot = getattr(sym, "lotsize", None)
+    if lot is not None:
+        try:
+            flot = float(lot)
+            if 0 < flot < 1.0:
+                return flot
+        except (TypeError, ValueError):
+            pass
+    if cv is not None:
+        try:
+            return float(cv)
+        except (TypeError, ValueError):
+            pass
+    return None
+
+
 def _build_snapshot(symbols, broker: str) -> _SymbolSnapshot:
     """Build a complete, loaded snapshot from SymToken rows. Pure: no shared state."""
     by_symbol_exchange: dict[tuple[str, str], SymbolData] = {}
@@ -282,7 +308,7 @@ def _build_snapshot(symbols, broker: str) -> _SymbolSnapshot:
             instrumenttype=sym.instrumenttype,
             tick_size=sym.tick_size,
             underlying=underlying,
-            contract_value=getattr(sym, "contract_value", None),
+            contract_value=_resolve_contract_value(sym),
         )
 
         # Store in primary dict
@@ -354,7 +380,8 @@ class BrokerSymbolCache:
     """
 
     def __init__(self):
-        self._snap = _SymbolSnapshot()
+        self._default_snap = _SymbolSnapshot()
+        self._snaps: dict[str, _SymbolSnapshot] = {}
         # Serialises loads, which span database I/O: two loads that overlapped
         # (the boot restore and a login's download hook) used to interleave
         # their clears and fills into one set of dicts. A plain stdlib lock:
@@ -367,6 +394,32 @@ class BrokerSymbolCache:
         self.stats = CacheStats()
 
         logger.debug("BrokerSymbolCache initialized")
+
+    def _scope_key(self) -> str:
+        try:
+            from utils.broker_context import BROKERS, current_broker
+
+            broker = current_broker()
+            if broker in BROKERS:
+                return broker
+        except Exception:
+            pass
+        return ""
+
+    @property
+    def _snap(self) -> _SymbolSnapshot:
+        key = self._scope_key()
+        if key:
+            return self._snaps.get(key, self._default_snap)
+        return self._default_snap
+
+    @_snap.setter
+    def _snap(self, value: _SymbolSnapshot) -> None:
+        key = self._scope_key()
+        if key:
+            self._snaps[key] = value
+        else:
+            self._default_snap = value
 
     # -- The current snapshot, attribute by attribute ------------------------
 
@@ -1080,6 +1133,7 @@ def get_symbol_info_dbquery(symbol: str, exchange: str) -> SymbolData | None:
                 lotsize=sym_token.lotsize,
                 instrumenttype=sym_token.instrumenttype,
                 tick_size=sym_token.tick_size,
+                contract_value=_resolve_contract_value(sym_token),
             )
         else:
             return None

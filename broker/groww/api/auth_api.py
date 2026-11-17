@@ -38,7 +38,11 @@ def _login_error(body, status_code=None):
     reason = None
     if isinstance(body, dict):
         error = body.get("error")
-        reason = (error.get("message") if isinstance(error, dict) else None) or body.get("message")
+        reason = (
+            (error.get("message") or error.get("errorMessage"))
+            if isinstance(error, dict)
+            else None
+        ) or body.get("message") or body.get("errorMessage")
     message = "Groww did not issue an access token"
     if reason:
         message += f": {reason}"

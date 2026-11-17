@@ -507,6 +507,15 @@ def process_delta_products(products):
     return df
 
 
+def _safe_emit(event: str, payload: dict):
+    """Emit a Socket.IO event without failing when called outside a web/socket context."""
+    try:
+        return socketio.emit(event, payload)
+    except Exception as exc:
+        logger.debug(f"Skipping socketio.emit({event!r}) outside socket context: {exc}")
+        return payload
+
+
 def master_contract_download():
     """
     Download and store Delta Exchange master contract data.
@@ -518,7 +527,7 @@ def master_contract_download():
         products, fetch_success = fetch_delta_products()
 
         if not products:
-            return socketio.emit(
+            return _safe_emit(
                 "master_contract_download",
                 {"status": "error", "message": "No products returned from Delta Exchange"},
             )
@@ -527,7 +536,7 @@ def master_contract_download():
             # Pagination was interrupted mid-way (HTTP error, API error, exception,
             # or MAX_PAGES hit).  Returning partial data as success would silently
             # truncate the master contract DB — keep the existing table intact.
-            return socketio.emit(
+            return _safe_emit(
                 "master_contract_download",
                 {
                     "status": "error",
@@ -541,14 +550,14 @@ def master_contract_download():
         token_df = process_delta_products(products)
 
         if token_df.empty:
-            return socketio.emit(
+            return _safe_emit(
                 "master_contract_download",
                 {"status": "error", "message": "No live instruments found on Delta Exchange"},
             )
 
         delete_symtoken_table()
         copy_from_dataframe(token_df)
-        return socketio.emit(
+        return _safe_emit(
             "master_contract_download",
             {
                 "status": "success",
@@ -558,7 +567,7 @@ def master_contract_download():
 
     except Exception as e:
         logger.exception(f"Error during Delta Exchange master contract download: {e}")
-        return socketio.emit("master_contract_download", {"status": "error", "message": str(e)})
+        return _safe_emit("master_contract_download", {"status": "error", "message": str(e)})
 
 
 def search_symbols(symbol, exchange):

@@ -200,21 +200,31 @@ def uses_project_database() -> bool:
 
 
 def _with_each_broker_database(read):
-    """Call ``read`` once, or once inside each broker file when none is selected.
+    """Call ``read`` inside each broker file when using the per-broker project DB.
 
-    ``GET /api/broker/list`` does not name a broker, but each broker's keys
-    live in that broker's database. A request that already entered one reads
-    only that file.
+    ``GET /api/broker/list`` may carry ``X-OpenAlgo-Broker`` from the active tab,
+    but each broker's keys live in that broker's own database, so listing saved
+    keys must inspect all broker directories.
     """
-    from utils.broker_context import BROKERS, broker_context, current_broker
+    from utils.broker_context import BROKERS, broker_context
 
-    if not uses_project_database() or current_broker() in BROKERS:
+    if not uses_project_database():
         return read()
     found = []
     for name in BROKERS:
         with broker_context(name):
             found.extend(read() or [])
     return found
+
+
+def _in_broker_db(broker, fn):
+    """Run ``fn`` inside ``broker``'s database when using the per-broker project layout."""
+    from utils.broker_context import BROKERS, broker_context, current_broker
+
+    if uses_project_database() and broker in BROKERS and current_broker() != broker:
+        with broker_context(broker):
+            return fn()
+    return fn()
 
 
 def get_broker_keys(broker):
@@ -289,31 +299,35 @@ def save_broker_keys(broker, values, redirect_url=None):
     Returns:
         tuple[bool, str]: Whether it was saved, and a message for the trader.
     """
-    try:
-        row = BrokerKey.query.filter_by(broker=broker).first()
-        if row is None:
-            if not values.get("api_key"):
-                return False, "Enter the API key to save this broker."
-            row = BrokerKey(broker=broker)
-            db_session.add(row)
-        for field in KEY_FIELDS:
-            value = values.get(field)
-            if value:
-                setattr(row, field, _encrypt(broker, field, value))
-        if redirect_url is not None:
-            row.redirect_url = redirect_url
-        row.updated_at = datetime.utcnow()
-        db_session.commit()
-        from utils.broker_keys import forget_cached_broker_keys
 
-        forget_cached_broker_keys(broker)
-        return True, "Saved."
-    except Exception:
-        db_session.rollback()
-        logger.exception(f"Could not save the keys for {broker}")
-        return False, "Could not save the keys. Try again."
-    finally:
-        db_session.remove()
+    def _save():
+        try:
+            row = BrokerKey.query.filter_by(broker=broker).first()
+            if row is None:
+                if not values.get("api_key"):
+                    return False, "Enter the API key to save this broker."
+                row = BrokerKey(broker=broker)
+                db_session.add(row)
+            for field in KEY_FIELDS:
+                value = values.get(field)
+                if value:
+                    setattr(row, field, _encrypt(broker, field, value))
+            if redirect_url is not None:
+                row.redirect_url = redirect_url
+            row.updated_at = datetime.utcnow()
+            db_session.commit()
+            from utils.broker_keys import forget_cached_broker_keys
+
+            forget_cached_broker_keys(broker)
+            return True, "Saved."
+        except Exception:
+            db_session.rollback()
+            logger.exception(f"Could not save the keys for {broker}")
+            return False, "Could not save the keys. Try again."
+        finally:
+            db_session.remove()
+
+    return _in_broker_db(broker, _save)
 
 
 def delete_broker_keys(broker):
@@ -322,19 +336,23 @@ def delete_broker_keys(broker):
     Returns:
         bool: True when a row was removed.
     """
-    try:
-        deleted = BrokerKey.query.filter_by(broker=broker).delete()
-        db_session.commit()
-        from utils.broker_keys import forget_cached_broker_keys
 
-        forget_cached_broker_keys(broker)
-        return bool(deleted)
-    except Exception:
-        db_session.rollback()
-        logger.exception(f"Could not remove the keys for {broker}")
-        return False
-    finally:
-        db_session.remove()
+    def _delete():
+        try:
+            deleted = BrokerKey.query.filter_by(broker=broker).delete()
+            db_session.commit()
+            from utils.broker_keys import forget_cached_broker_keys
+
+            forget_cached_broker_keys(broker)
+            return bool(deleted)
+        except Exception:
+            db_session.rollback()
+            logger.exception(f"Could not remove the keys for {broker}")
+            return False
+        finally:
+            db_session.remove()
+
+    return _in_broker_db(broker, _delete)
 
 
 def record_login_state(broker, nonce, state):
@@ -346,36 +364,42 @@ def record_login_state(broker, nonce, state):
     Returns:
         bool: True when recorded.
     """
-    now = datetime.utcnow()
-    try:
-        db_session.execute(sql_delete(BrokerLoginState).where(BrokerLoginState.expires_at <= now))
-        db_session.add(
-            BrokerLoginState(
-                nonce_hash=_digest(nonce),
-                state_hash=_digest(state),
-                broker=broker,
-                created_at=now,
-                expires_at=now + LOGIN_STATE_TTL,
+
+    def _record():
+        now = datetime.utcnow()
+        try:
+            db_session.execute(
+                sql_delete(BrokerLoginState).where(BrokerLoginState.expires_at <= now)
             )
-        )
-        db_session.flush()
-        stale = (
-            BrokerLoginState.query.order_by(
-                BrokerLoginState.created_at.desc(), BrokerLoginState.id.desc()
+            db_session.add(
+                BrokerLoginState(
+                    nonce_hash=_digest(nonce),
+                    state_hash=_digest(state),
+                    broker=broker,
+                    created_at=now,
+                    expires_at=now + LOGIN_STATE_TTL,
+                )
             )
-            .offset(MAX_LOGIN_STATES)
-            .all()
-        )
-        for row in stale:
-            db_session.delete(row)
-        db_session.commit()
-        return True
-    except Exception:
-        db_session.rollback()
-        logger.exception("Could not record a started broker login")
-        return False
-    finally:
-        db_session.remove()
+            db_session.flush()
+            stale = (
+                BrokerLoginState.query.order_by(
+                    BrokerLoginState.created_at.desc(), BrokerLoginState.id.desc()
+                )
+                .offset(MAX_LOGIN_STATES)
+                .all()
+            )
+            for row in stale:
+                db_session.delete(row)
+            db_session.commit()
+            return True
+        except Exception:
+            db_session.rollback()
+            logger.exception("Could not record a started broker login")
+            return False
+        finally:
+            db_session.remove()
+
+    return _in_broker_db(broker, _record)
 
 
 def find_open_login(broker, nonce=None, state=None):
@@ -387,23 +411,27 @@ def find_open_login(broker, nonce=None, state=None):
     """
     if not nonce and not state:
         return None
-    try:
-        query = BrokerLoginState.query.filter(
-            BrokerLoginState.broker == broker,
-            BrokerLoginState.expires_at > datetime.utcnow(),
-        )
-        if nonce:
-            query = query.filter(BrokerLoginState.nonce_hash == _digest(nonce))
-        else:
-            query = query.filter(BrokerLoginState.state_hash == _digest(state))
-        row = query.first()
-        return (row.id, row.created_at.replace(tzinfo=UTC)) if row else None
-    except Exception as exc:
-        if not _table_missing(exc):
-            logger.exception("Could not read the started broker logins")
-        return None
-    finally:
-        db_session.remove()
+
+    def _find():
+        try:
+            query = BrokerLoginState.query.filter(
+                BrokerLoginState.broker == broker,
+                BrokerLoginState.expires_at > datetime.utcnow(),
+            )
+            if nonce:
+                query = query.filter(BrokerLoginState.nonce_hash == _digest(nonce))
+            else:
+                query = query.filter(BrokerLoginState.state_hash == _digest(state))
+            row = query.first()
+            return (row.id, row.created_at.replace(tzinfo=UTC)) if row else None
+        except Exception as exc:
+            if not _table_missing(exc):
+                logger.exception("Could not read the started broker logins")
+            return None
+        finally:
+            db_session.remove()
+
+    return _in_broker_db(broker, _find)
 
 
 def find_login_state(broker, nonce=None, state=None):

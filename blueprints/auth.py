@@ -48,8 +48,8 @@ from utils.session import (
 logger = get_logger(__name__)
 
 # Access environment variables
-LOGIN_RATE_LIMIT_MIN = os.getenv("LOGIN_RATE_LIMIT_MIN", "5 per minute")
-LOGIN_RATE_LIMIT_HOUR = os.getenv("LOGIN_RATE_LIMIT_HOUR", "25 per hour")
+LOGIN_RATE_LIMIT_MIN = os.getenv("LOGIN_RATE_LIMIT_MIN", "30 per minute")
+LOGIN_RATE_LIMIT_HOUR = os.getenv("LOGIN_RATE_LIMIT_HOUR", "300 per hour")
 RESET_RATE_LIMIT = os.getenv("RESET_RATE_LIMIT", "15 per hour")  # Password reset rate limit
 
 auth_bp = Blueprint("auth", __name__, url_prefix="/auth")
@@ -194,7 +194,7 @@ def start_broker_login():
         return jsonify(
             {"status": "error", "message": "The broker login could not be started. Try again."}
         ), 500
-    return jsonify({"status": "success", "url": url})
+    return jsonify({"status": "success", "url": url, "broker": broker})
 
 
 @auth_bp.route("/broker/resume", methods=["POST"])
@@ -392,8 +392,8 @@ def _stored_session_unchanged(username, broker, auth_token):
 
 
 @auth_bp.route("/login", methods=["GET", "POST"])
-@limiter.limit(LOGIN_RATE_LIMIT_MIN)
-@limiter.limit(LOGIN_RATE_LIMIT_HOUR)
+@limiter.limit(LOGIN_RATE_LIMIT_MIN, methods=["POST"])
+@limiter.limit(LOGIN_RATE_LIMIT_HOUR, methods=["POST"])
 def login():
     # Handle POST requests first (for React SPA / AJAX login)
     if request.method == "POST":
@@ -671,8 +671,8 @@ def two_factor_configure():
 
 
 @auth_bp.route("/broker", methods=["GET", "POST"])
-@limiter.limit(LOGIN_RATE_LIMIT_MIN)
-@limiter.limit(LOGIN_RATE_LIMIT_HOUR)
+@limiter.limit(LOGIN_RATE_LIMIT_MIN, methods=["POST"])
+@limiter.limit(LOGIN_RATE_LIMIT_HOUR, methods=["POST"])
 def broker_login():
     if session.get("logged_in"):
         # Only bounce to the dashboard when the stored broker token is still
@@ -696,7 +696,7 @@ def broker_login():
 
 
 @auth_bp.route("/reset-password", methods=["GET", "POST"])
-@limiter.limit(RESET_RATE_LIMIT)  # Password reset rate limit
+@limiter.limit(RESET_RATE_LIMIT, methods=["POST"])  # Password reset rate limit
 def reset_password():
     # GET requests are handled by React frontend - redirect there
     if request.method == "GET":

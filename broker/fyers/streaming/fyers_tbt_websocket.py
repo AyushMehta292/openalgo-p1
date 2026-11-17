@@ -224,7 +224,16 @@ class FyersTbtWebSocket:
                     on_open=self._on_open,
                 )
 
-                self.ws.run_forever(ping_interval=0)  # We handle ping manually
+                try:
+                    import certifi
+
+                    sslopt = {"ca_certs": certifi.where()}
+                except Exception:
+                    sslopt = None
+                if sslopt:
+                    self.ws.run_forever(ping_interval=0, sslopt=sslopt)  # We handle ping manually
+                else:
+                    self.ws.run_forever(ping_interval=0)  # We handle ping manually
 
             except Exception as e:
                 self.logger.error(f"WebSocket error: {e}")
