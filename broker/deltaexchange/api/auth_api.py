@@ -83,6 +83,18 @@ def authenticate_broker(code):
                 else None
             )
             if code_str == "ip_not_whitelisted_for_api_key":
+                try:
+                    from database.settings_db import get_analyze_mode
+
+                    if get_analyze_mode():
+                        logger.warning(
+                            "Delta Exchange IP %s not whitelisted for private endpoints; "
+                            "allowing Analyze (Paper) mode session with saved API key.",
+                            client_ip,
+                        )
+                        return api_key, None
+                except Exception:
+                    pass
                 msg = (
                     f"Delta Exchange refused login: IP {client_ip or 'current IP'} is not "
                     "whitelisted for this API key."

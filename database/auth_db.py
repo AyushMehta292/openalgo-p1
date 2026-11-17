@@ -1770,16 +1770,20 @@ def _auth_token_broker(provided_api_key, include_feed_token=False):
                     logger.warning(f"Cached auth token was revoked for user_id '{user_id}'.")
                     return _revoked_or_missing_session(include_feed_token, auth_obj.broker)
                 # A prior negative cache for a revoked session: keep the broker
-                # name so callers can distinguish it from an unknown API key.
+                # name so callers can distinguish it from an unknown API key,
+                # unless the database row has since been restored.
                 if (
                     isinstance(cached_result, tuple)
                     and cached_result
                     and cached_result[0] is None
                 ):
+                    if not (auth_obj and not auth_obj.is_revoked and auth_obj.auth):
+                        return cached_result
+                    auth_cache.pop(cache_key, None)
+                else:
+                    # Not revoked, return cached result
+                    logger.debug(f"Auth token retrieved from cache for user_id: {user_id}")
                     return cached_result
-                # Not revoked, return cached result
-                logger.debug(f"Auth token retrieved from cache for user_id: {user_id}")
-                return cached_result
             except Exception as e:
                 logger.exception(f"Error checking revocation status: {e}")
                 # On error, don't use cache. pop, not del: this is the recovery
