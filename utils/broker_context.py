@@ -15,6 +15,7 @@ from __future__ import annotations
 import contextvars
 import os
 from collections.abc import Callable, Iterator
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from pathlib import Path
 
@@ -38,6 +39,16 @@ _BROKER_SCOPED_SESSIONS: tuple[tuple[str, str], ...] = (
     ("database.settings_db", "db_session"),
     ("database.sandbox_db", "db_session"),
     ("database.symbol", "db_session"),
+    ("database.latency_db", "latency_session"),
+    ("database.analyzer_db", "db_session"),
+    ("database.apilog_db", "db_session"),
+    ("database.traffic_db", "logs_session"),
+    ("database.health_db", "health_session"),
+    ("database.strategy_book_db", "db_session"),
+    ("database.strategy_module_db", "db_session"),
+    ("database.flow_db", "db_session"),
+    ("database.telegram_db", "db_session"),
+    ("database.whatsapp_db", "db_session"),
 )
 
 
@@ -343,6 +354,61 @@ def retarget_sqlite_database(database):
 
     dest = broker_db_file(rel.name)
     return str(dest)
+
+
+def sqlite_url_needs_broker(url: str | None) -> bool:
+    """True when ``url`` is a SQLite URL targeting a broker-scoped file under ``PROJECT_ROOT/db/``."""
+    if not url:
+        return False
+    text = str(url).strip()
+    if "sqlite" not in text.split("://", 1)[0] or ":///" not in text:
+        return False
+    raw = text.split(":///", 1)[1].split("?", 1)[0]
+    if not raw or raw == ":memory:" or raw.startswith("file:"):
+        return False
+    path = Path(raw)
+    if not path.is_absolute():
+        path = (Path.cwd() / path).resolve()
+    else:
+        path = path.resolve()
+    db_root = (PROJECT_ROOT / "db").resolve()
+    try:
+        rel = path.relative_to(db_root)
+    except ValueError:
+        return False
+    return len(rel.parts) == 1 and rel.name in BROKER_DB_FILES
+
+
+def _wrap_for_broker(broker: str, fn: Callable) -> Callable:
+    def _run(*call_args, **call_kwargs):
+        if current_broker() == broker:
+            return fn(*call_args, **call_kwargs)
+        with broker_context(broker):
+            return fn(*call_args, **call_kwargs)
+
+    return _run
+
+
+class BrokerContextThreadPoolExecutor(ThreadPoolExecutor):
+    """ThreadPoolExecutor that captures ``current_broker()`` at submit()/map() time
+    and re-enters ``broker_context(broker)`` on the worker thread when active."""
+
+    def submit(self, fn, /, *args, **kwargs):
+        broker = current_broker()
+        if broker not in BROKERS:
+            return super().submit(fn, *args, **kwargs)
+        return super().submit(_wrap_for_broker(broker, fn), *args, **kwargs)
+
+    def map(self, fn, *iterables, timeout=None, chunksize=1):
+        broker = current_broker()
+        if broker not in BROKERS:
+            return super().map(fn, *iterables, timeout=timeout, chunksize=chunksize)
+        return super().map(
+            _wrap_for_broker(broker, fn),
+            *iterables,
+            timeout=timeout,
+            chunksize=chunksize,
+        )
 
 
 def install_scheduler_scope() -> None:

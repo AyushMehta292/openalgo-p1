@@ -16,12 +16,12 @@ own polling thread.
 import atexit
 import logging
 import threading
-from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Optional
 
 from services.flow_node_contracts import VALID_STATUSES, normalize_status
+from utils.broker_context import BrokerContextThreadPoolExecutor
 from utils.env_config import env_int
 from utils.event_bus import bus
 from utils.logging import get_logger
@@ -32,7 +32,7 @@ logger = get_logger(__name__)
 # bursts (a basket filling leg by leg), and each run executes a whole workflow
 # holding DB sessions and broker calls. A module-level pool caps that
 # concurrency and reuses its threads for the life of the worker.
-_WORKFLOW_POOL = ThreadPoolExecutor(
+_WORKFLOW_POOL = BrokerContextThreadPoolExecutor(
     max_workers=env_int("FLOW_ORDER_UPDATE_WORKERS", 4, minimum=1),
     thread_name_prefix="flow-order-update",
 )

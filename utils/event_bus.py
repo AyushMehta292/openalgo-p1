@@ -21,10 +21,10 @@ time, not the rows in the database.
 
 import threading
 from collections import defaultdict
-from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from typing import Any, NamedTuple
 
+from utils.broker_context import BrokerContextThreadPoolExecutor
 from utils.db_sessions import remove_all_scoped_sessions
 from utils.logging import get_logger
 
@@ -73,13 +73,15 @@ class EventBus:
     ):
         self._subscribers: dict[str, list[_Subscription]] = defaultdict(list)
         self._lock = threading.Lock()
-        self._executor = ThreadPoolExecutor(max_workers=workers, thread_name_prefix="eventbus")
+        self._executor = BrokerContextThreadPoolExecutor(
+            max_workers=workers, thread_name_prefix="eventbus"
+        )
         self._max_pending = max_pending
         self._pending = 0
         self._dropped = 0
         # The critical lane's pool starts no threads until a critical callback
         # is first submitted, so a bus with no critical subscriber costs nothing.
-        self._critical_executor = ThreadPoolExecutor(
+        self._critical_executor = BrokerContextThreadPoolExecutor(
             max_workers=critical_workers, thread_name_prefix="eventbus-critical"
         )
         self._critical_max_pending = critical_max_pending

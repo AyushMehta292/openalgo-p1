@@ -104,6 +104,7 @@ def effective_run_mode() -> str:
 def _sync_strategy_module_mode(paper: bool) -> None:
     """Make this broker's strategies follow the same paper or live choice."""
     try:
+        from sqlalchemy.exc import OperationalError
         from sqlalchemy.orm.attributes import flag_modified
 
         from database.strategy_module_db import SmStrategy, db_session
@@ -115,6 +116,11 @@ def _sync_strategy_module_mode(paper: bool) -> None:
             row.scheduler = scheduler
             flag_modified(row, "scheduler")
         db_session.commit()
+    except OperationalError as e:
+        if "no such table" in str(e).lower():
+            logger.debug(f"Strategy module table not initialized yet; skipping mode sync: {e}")
+        else:
+            logger.exception("Could not apply paper/live to the strategy module")
     except Exception:
         logger.exception("Could not apply paper/live to the strategy module")
 

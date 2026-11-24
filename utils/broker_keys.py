@@ -165,6 +165,8 @@ _base_getitem = _ENVIRON_TYPE.__dict__.get("_openalgo_base_getitem") or _ENVIRON
 _base_iter = _ENVIRON_TYPE.__dict__.get("_openalgo_base_iter") or _ENVIRON_TYPE.__iter__
 _base_len = _ENVIRON_TYPE.__dict__.get("_openalgo_base_len") or _ENVIRON_TYPE.__len__
 _base_contains = _ENVIRON_TYPE.__dict__.get("_openalgo_base_contains") or _ENVIRON_TYPE.__contains__
+_base_pop = _ENVIRON_TYPE.__dict__.get("_openalgo_base_pop") or _ENVIRON_TYPE.pop
+_POP_MARKER = object()
 
 
 def _staged_here(environ):
@@ -183,14 +185,22 @@ def _overlay_getitem(self, key):
             raise KeyError(key)
         return value
     if key in ENV_VARS.values():
-        # Broker keys come from the current broker's database. With no broker
-        # selected, the .env values are not used: .env does not name a broker.
+        # In the multi-broker project-database layout, broker keys come only from
+        # the active broker's database (and read as "" when no broker is selected).
+        # On standalone/test single-file databases, honor keys set in the process
+        # environment and return "" when unset so membership and reads stay safe.
+        from database.broker_keys_db import uses_project_database
         from utils.broker_context import BROKERS, current_broker
 
-        broker = current_broker()
-        if broker not in BROKERS:
+        if uses_project_database():
+            broker = current_broker()
+            if broker not in BROKERS:
+                return ""
+            return _keys_from_database(broker).get(key, "")
+        try:
+            return _base_getitem(self, key)
+        except KeyError:
             return ""
-        return _keys_from_database(broker).get(key, "")
     return _base_getitem(self, key)
 
 
@@ -230,15 +240,31 @@ def _overlay_contains(self, key):
     return True
 
 
+def _overlay_pop(self, key, default=_POP_MARKER):
+    """Pop ``key`` from the underlying environment without tripping on ``""`` overlay defaults."""
+    if self is os.environ and key in ENV_VARS.values():
+        try:
+            _base_getitem(self, key)
+        except KeyError:
+            if default is _POP_MARKER:
+                raise KeyError(key) from None
+            return default
+    if default is _POP_MARKER:
+        return _base_pop(self, key)
+    return _base_pop(self, key, default)
+
+
 if "_openalgo_base_getitem" not in _ENVIRON_TYPE.__dict__:
     _ENVIRON_TYPE._openalgo_base_getitem = _base_getitem
     _ENVIRON_TYPE._openalgo_base_iter = _base_iter
     _ENVIRON_TYPE._openalgo_base_len = _base_len
     _ENVIRON_TYPE._openalgo_base_contains = _base_contains
+    _ENVIRON_TYPE._openalgo_base_pop = _base_pop
     _ENVIRON_TYPE.__getitem__ = _overlay_getitem
     _ENVIRON_TYPE.__iter__ = _overlay_iter
     _ENVIRON_TYPE.__len__ = _overlay_len
     _ENVIRON_TYPE.__contains__ = _overlay_contains
+    _ENVIRON_TYPE.pop = _overlay_pop
 
 
 _db_key_cache: dict[str, dict] = {}
@@ -404,8 +430,21 @@ def env_file_values():
 
 
 def env_broker(values=None):
-    """No broker is selected from .env. Keys live in each broker's database."""
-    return None
+    """The broker named by .env, or None.
+
+    In the multi-broker project-database layout (``db/openalgo.db`` -> per-broker
+    directories), keys live in each broker's database and ``.env`` does not select
+    a broker. On single-file / standalone test databases, preserve the ``.env``
+    broker resolver.
+    """
+    from database.broker_keys_db import uses_project_database
+
+    if uses_project_database():
+        return None
+    values = values if values is not None else env_file_values()
+    if not values["api_key"]:
+        return None
+    return broker_from_redirect_url(values["redirect_url"])
 
 
 #: API key layouts some brokers need, as "field:::field". (separators, message)

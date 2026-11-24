@@ -9,12 +9,12 @@ import atexit
 import logging
 import threading
 import time
-from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from typing import Any, Optional
 
 from services.flow_openalgo_client import FlowOpenAlgoClient, get_flow_client
+from utils.broker_context import BrokerContextThreadPoolExecutor
 from utils.env_config import env_int
 from utils.logging import get_logger
 
@@ -23,7 +23,7 @@ logger = get_logger(__name__)
 # Shared and bounded, never one thread per fire: an every_time alert on a fast
 # poll interval would otherwise spawn a thread per tick, each running a whole
 # workflow. Mirrors the order-update monitor's pool.
-_WORKFLOW_POOL = ThreadPoolExecutor(
+_WORKFLOW_POOL = BrokerContextThreadPoolExecutor(
     max_workers=env_int("FLOW_PRICE_ALERT_WORKERS", 4, minimum=1),
     thread_name_prefix="flow-price-alert",
 )

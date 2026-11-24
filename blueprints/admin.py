@@ -639,21 +639,44 @@ def _db_secrets_status() -> dict:
     diagnostics UI. Each lookup is wrapped in try/except so a transient DB
     failure on one feature can't blank out the whole diagnostics page.
     """
+    from utils.broker_context import BROKERS, broker_context, current_broker, env_points_at_project_db
+
+    scan_brokers = env_points_at_project_db() and current_broker() not in BROKERS
     out: dict[str, bool] = {}
 
     try:
         from database.settings_db import get_smtp_settings
 
-        smtp = get_smtp_settings() or {}
-        out["SMTP password (DB)"] = bool(smtp.get("smtp_password"))
+        if scan_brokers:
+            has_smtp = False
+            for name in BROKERS:
+                with broker_context(name):
+                    smtp = get_smtp_settings() or {}
+                    if smtp.get("smtp_password"):
+                        has_smtp = True
+                        break
+            out["SMTP password (DB)"] = has_smtp
+        else:
+            smtp = get_smtp_settings() or {}
+            out["SMTP password (DB)"] = bool(smtp.get("smtp_password"))
     except Exception:
         out["SMTP password (DB)"] = False
 
     try:
         from database.telegram_db import get_bot_config
 
-        bot = get_bot_config() or {}
-        out["Telegram bot token (DB)"] = bool(bot.get("bot_token") or bot.get("token"))
+        if scan_brokers:
+            has_bot = False
+            for name in BROKERS:
+                with broker_context(name):
+                    bot = get_bot_config() or {}
+                    if bot.get("bot_token") or bot.get("token"):
+                        has_bot = True
+                        break
+            out["Telegram bot token (DB)"] = has_bot
+        else:
+            bot = get_bot_config() or {}
+            out["Telegram bot token (DB)"] = bool(bot.get("bot_token") or bot.get("token"))
     except Exception:
         out["Telegram bot token (DB)"] = False
 
@@ -1628,6 +1651,11 @@ def _database_snapshot():
 def _trading_mode():
     """Return Live / Analyze and a safe label."""
     try:
+        from utils.broker_context import BROKERS, current_broker, env_points_at_project_db
+
+        if env_points_at_project_db() and current_broker() not in BROKERS:
+            return {"analyze_mode": None, "label": "UNKNOWN"}
+
         from database.settings_db import get_analyze_mode
 
         mode = get_analyze_mode()

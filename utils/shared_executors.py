@@ -24,6 +24,7 @@ from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
 from utils import real_threading
+from utils.broker_context import BrokerContextThreadPoolExecutor
 from utils.logging import get_logger
 
 logger = get_logger(__name__)
@@ -69,7 +70,7 @@ def get_executor(name: str, max_workers: int) -> ThreadPoolExecutor:
     with _lock:
         executor = _executors.get(name)
         if executor is None:
-            executor = ThreadPoolExecutor(
+            executor = BrokerContextThreadPoolExecutor(
                 max_workers=max_workers, thread_name_prefix=f"openalgo-{name}"
             )
             _executors[name] = executor

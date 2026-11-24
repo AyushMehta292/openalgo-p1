@@ -26,6 +26,8 @@ import psutil
 from database.health_db import (
     HealthAlert,
     HealthMetric,
+    compact_thread_details,
+    get_health_retention_days,
     health_session,
     init_health_db,
     purge_old_metrics,
@@ -36,7 +38,7 @@ logger = logging.getLogger(__name__)
 # Configuration from environment
 HEALTH_MONITOR_ENABLED = os.getenv("HEALTH_MONITOR_ENABLED", "true").lower() == "true"
 HEALTH_SAMPLE_INTERVAL = int(os.getenv("HEALTH_SAMPLE_INTERVAL", "10"))  # seconds
-HEALTH_RETENTION_DAYS = int(os.getenv("HEALTH_RETENTION_DAYS", "7"))
+HEALTH_RETENTION_DAYS = get_health_retention_days()
 
 # File Descriptor / Handle Thresholds
 # Windows handles are NOT Unix FDs — a normal Flask app uses 500-2000+ handles.
@@ -561,7 +563,7 @@ def get_thread_metrics():
         result = {
             "count": reported_count,
             "stuck_count": stuck_count,
-            "threads": threads_info[:50],  # Limit to first 50 for JSON size
+            "threads": compact_thread_details(threads_info),
             "status": status,
         }
         if uncounted:
@@ -765,8 +767,11 @@ def init_health_monitoring(app):
         from utils.broker_context import run_for_each_broker
 
         def _init_one():
-            init_health_db()
-            purge_old_metrics(days=HEALTH_RETENTION_DAYS)
+            try:
+                init_health_db()
+                purge_old_metrics(days=HEALTH_RETENTION_DAYS)
+            finally:
+                health_session.remove()
 
         run_for_each_broker(_init_one)
 

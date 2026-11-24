@@ -2,7 +2,6 @@
 
 import json
 import os
-from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 
 import pytz
@@ -12,6 +11,12 @@ from sqlalchemy.orm import scoped_session, sessionmaker
 from sqlalchemy.pool import NullPool
 from sqlalchemy.sql import func
 
+from utils.broker_context import (
+    BROKERS,
+    BrokerContextThreadPoolExecutor,
+    current_broker,
+    sqlite_url_needs_broker,
+)
 from utils.logging import get_logger
 
 logger = get_logger(__name__)
@@ -86,12 +91,16 @@ def init_db():
 
 
 # Executor for asynchronous tasks
-executor = ThreadPoolExecutor(10)  # Increased from 2 to 10 for better concurrency
+executor = BrokerContextThreadPoolExecutor(10, thread_name_prefix="analyzer-log")
 
 
 def async_log_analyzer(request_data, response_data, api_type="placeorder"):
     """Asynchronously log analyzer request"""
     try:
+        if current_broker() not in BROKERS:
+            bind_url = str(getattr(db_session.get_bind(), "url", "") or DATABASE_URL or "")
+            if sqlite_url_needs_broker(bind_url):
+                return
         # Serialize JSON data for storage
         request_json = json.dumps(request_data)
         response_json = json.dumps(response_data)

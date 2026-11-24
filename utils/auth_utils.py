@@ -343,10 +343,13 @@ def _run_claimed_download(broker: str):
     The worker is a new thread, so it does not keep the broker the request
     selected. The contract is written into that broker's database.
     """
-    from utils.broker_context import broker_context
+    from contextlib import nullcontext
 
+    from utils.broker_context import BROKERS, broker_context
+
+    ctx = broker_context(broker) if broker in BROKERS else nullcontext()
     try:
-        with broker_context(broker):
+        with ctx:
             return _download_master_contract(broker)
     finally:
         _release_master_contract_download(broker)
@@ -382,10 +385,13 @@ def try_start_cached_master_contract_load(broker: str) -> bool:
 
 def _run_claimed_cached_load(broker: str):
     """Run a cached load whose claim the caller already holds, then release it."""
-    from utils.broker_context import broker_context
+    from contextlib import nullcontext
 
+    from utils.broker_context import BROKERS, broker_context
+
+    ctx = broker_context(broker) if broker in BROKERS else nullcontext()
     try:
-        with broker_context(broker):
+        with ctx:
             return load_existing_master_contract(broker)
     finally:
         _release_master_contract_download(broker)

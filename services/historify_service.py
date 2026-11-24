@@ -1300,10 +1300,12 @@ import random
 import threading
 import time
 import uuid
-from concurrent.futures import ThreadPoolExecutor
+from utils.broker_context import BrokerContextThreadPoolExecutor
 
 # Job executor pool - shared across all job operations
-_job_executor = ThreadPoolExecutor(max_workers=int(os.getenv("HISTORIFY_MAX_WORKERS", "5")))
+_job_executor = BrokerContextThreadPoolExecutor(
+    max_workers=int(os.getenv("HISTORIFY_MAX_WORKERS", "5"))
+)
 
 # Track running jobs for cancellation and pause state
 _running_jobs: dict[str, bool] = {}

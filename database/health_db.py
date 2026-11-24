@@ -16,9 +16,12 @@ Follows industry standards (draft-inadarei-api-health-check):
 
 import logging
 import os
+import threading
+import time
 from datetime import datetime, timedelta, timezone
 
-from sqlalchemy import JSON, Boolean, Column, DateTime, Float, Integer, String
+from sqlalchemy import JSON, Boolean, Column, DateTime, Float, Integer, String, null, text
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import scoped_session, sessionmaker
 from sqlalchemy.sql import func
@@ -26,6 +29,122 @@ from sqlalchemy.sql import func
 from database.engine_factory import create_db_engine
 
 logger = logging.getLogger(__name__)
+
+DEFAULT_RETENTION_DAYS = 2
+DEFAULT_PRUNE_INTERVAL_SECONDS = 3600
+DEFAULT_MAX_THREAD_DETAILS = 15
+DEFAULT_MAX_PROCESS_DETAILS = 5
+DEFAULT_DETAIL_RETENTION_MINUTES = 10
+
+_POOL_THREAD_PREFIXES = ("ThreadPoolExecutor", "Dummy-")
+_prune_lock = threading.Lock()
+_last_prune_by_key: dict[tuple[str, str], float] = {}
+
+
+def _int_env(name: str, default: int, minimum: int = 0) -> int:
+    raw = os.getenv(name)
+    if raw is None or raw == "":
+        return default
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        return default
+    return value if value >= minimum else default
+
+
+def get_health_retention_days() -> int:
+    """Return configured health metrics retention in days (default 2, minimum 1)."""
+    for env_name in ("HEALTH_METRICS_RETENTION_DAYS", "HEALTH_RETENTION_DAYS"):
+        raw = os.getenv(env_name)
+        if raw is not None and raw != "":
+            try:
+                value = int(raw)
+                return max(1, value)
+            except (TypeError, ValueError):
+                return DEFAULT_RETENTION_DAYS
+    return DEFAULT_RETENTION_DAYS
+
+
+def get_health_prune_interval_seconds() -> int:
+    return _int_env("HEALTH_PRUNE_INTERVAL_SECONDS", DEFAULT_PRUNE_INTERVAL_SECONDS, minimum=1)
+
+
+def get_health_max_thread_details() -> int:
+    return _int_env("HEALTH_MAX_THREAD_DETAILS", DEFAULT_MAX_THREAD_DETAILS, minimum=0)
+
+
+def get_health_max_process_details() -> int:
+    return _int_env("HEALTH_MAX_PROCESS_DETAILS", DEFAULT_MAX_PROCESS_DETAILS, minimum=0)
+
+
+def get_health_detail_retention_minutes() -> int:
+    return _int_env(
+        "HEALTH_DETAIL_RETENTION_MINUTES", DEFAULT_DETAIL_RETENTION_MINUTES, minimum=0
+    )
+
+
+def compact_thread_details(threads, max_items: int | None = None):
+    """Bound and normalize thread details for DB storage while preserving UI shape."""
+    if threads is None:
+        return None
+    limit = get_health_max_thread_details() if max_items is None else max(0, int(max_items))
+    if limit == 0 or not threads:
+        return []
+
+    non_pool = []
+    pool = []
+    for item in threads:
+        if not isinstance(item, dict):
+            continue
+        name = str(item.get("name") or "")
+        normalized = {
+            "id": item.get("id"),
+            "name": name[:64],
+            "daemon": bool(item.get("daemon", False)),
+            "alive": bool(item.get("alive", True)),
+        }
+        if name.startswith(_POOL_THREAD_PREFIXES):
+            pool.append(normalized)
+        else:
+            non_pool.append(normalized)
+
+    return (non_pool + pool)[:limit]
+
+
+def compact_process_details(processes, max_items: int | None = None):
+    """Bound and round process details for DB storage while preserving UI shape."""
+    if processes is None:
+        return None
+    limit = get_health_max_process_details() if max_items is None else max(0, int(max_items))
+    if limit == 0 or not processes:
+        return []
+
+    compacted = []
+    for item in processes[:limit]:
+        if not isinstance(item, dict):
+            continue
+        try:
+            rss_mb = round(float(item.get("rss_mb") or 0), 2)
+        except (TypeError, ValueError):
+            rss_mb = 0.0
+        try:
+            vms_mb = round(float(item.get("vms_mb") or 0), 2)
+        except (TypeError, ValueError):
+            vms_mb = 0.0
+        try:
+            mem_pct = round(float(item.get("memory_percent") or 0), 2)
+        except (TypeError, ValueError):
+            mem_pct = 0.0
+        compacted.append(
+            {
+                "pid": item.get("pid"),
+                "name": str(item.get("name") or "unknown")[:64],
+                "rss_mb": rss_mb,
+                "vms_mb": vms_mb,
+                "memory_percent": mem_pct,
+            }
+        )
+    return compacted
 
 # Use a separate database for health monitoring
 HEALTH_DATABASE_URL = os.getenv("HEALTH_DATABASE_URL", "sqlite:///db/health.db")
@@ -50,7 +169,7 @@ class HealthMetric(HealthBase):
     __tablename__ = "health_metrics"
 
     id = Column(Integer, primary_key=True)
-    timestamp = Column(DateTime(timezone=True), server_default=func.now())
+    timestamp = Column(DateTime(timezone=True), server_default=func.now(), index=True)
 
     # File Descriptors
     fd_count = Column(Integer)
@@ -81,11 +200,11 @@ class HealthMetric(HealthBase):
     # Thread Usage
     thread_count = Column(Integer)
     stuck_threads = Column(Integer)
-    thread_details = Column(JSON)  # List of thread info
+    thread_details = Column(JSON(none_as_null=True))  # List of thread info
     thread_status = Column(String(20))  # pass | warn | fail
 
     # Process Usage (top memory consumers)
-    process_details = Column(JSON)  # List of process info
+    process_details = Column(JSON(none_as_null=True))  # List of process info
 
     # Overall Health (following draft-inadarei-api-health-check)
     overall_status = Column(String(20))  # pass | warn | fail
@@ -98,6 +217,7 @@ class HealthMetric(HealthBase):
         ws_metrics=None,
         thread_metrics=None,
         process_metrics=None,
+        auto_prune: bool = True,
     ):
         """Log health metrics (background thread only - zero API latency impact)"""
         try:
@@ -151,16 +271,27 @@ class HealthMetric(HealthBase):
                 # Threads
                 thread_count=thread_metrics.get("count") if thread_metrics else None,
                 stuck_threads=thread_metrics.get("stuck_count") if thread_metrics else None,
-                thread_details=thread_metrics.get("threads") if thread_metrics else None,
+                thread_details=(
+                    compact_thread_details(thread_metrics.get("threads"))
+                    if thread_metrics
+                    else None
+                ),
                 thread_status=thread_metrics.get("status") if thread_metrics else "unknown",
                 # Processes
-                process_details=process_metrics if process_metrics else None,
+                process_details=(
+                    compact_process_details(process_metrics) if process_metrics else None
+                ),
                 # Overall
                 overall_status=overall_status,
             )
 
             health_session.add(metric)
             health_session.commit()
+            if auto_prune:
+                try:
+                    _maybe_periodic_prune()
+                except Exception as prune_err:
+                    logger.debug(f"Periodic health metrics prune skipped: {prune_err}")
             return True
         except Exception as e:
             logger.exception(f"Error logging health metrics: {str(e)}")
@@ -432,26 +563,176 @@ class HealthAlert(HealthBase):
             health_session.rollback()
 
 
+def _is_sqlite_engine(engine) -> bool:
+    try:
+        return engine is not None and engine.url.get_backend_name() == "sqlite"
+    except Exception:
+        return False
+
+
+def _current_prune_key() -> tuple[str, str]:
+    try:
+        from utils.broker_context import current_broker
+
+        broker = current_broker() or ""
+    except Exception:
+        broker = ""
+    url = str(getattr(health_engine, "url", "") or HEALTH_DATABASE_URL or "")
+    return (url, broker)
+
+
+def _mark_pruned(now: float | None = None) -> None:
+    key = _current_prune_key()
+    ts = time.monotonic() if now is None else now
+    with _prune_lock:
+        _last_prune_by_key[key] = ts
+
+
+def _maybe_periodic_prune() -> None:
+    interval = get_health_prune_interval_seconds()
+    key = _current_prune_key()
+    now = time.monotonic()
+    with _prune_lock:
+        last = _last_prune_by_key.get(key)
+        if last is not None and (now - last) < interval:
+            return
+        _last_prune_by_key[key] = now
+    purge_old_metrics(days=None, vacuum=True, vacuum_pages=0, compact_details=True)
+
+
+def _get_auto_vacuum_mode(engine) -> int | None:
+    if not _is_sqlite_engine(engine):
+        return None
+    try:
+        with engine.connect() as conn:
+            return conn.execute(text("PRAGMA auto_vacuum")).scalar()
+    except Exception:
+        return None
+
+
+def ensure_incremental_auto_vacuum(engine=None, allow_vacuum: bool = True) -> bool:
+    """Ensure SQLite health DB uses ``auto_vacuum = INCREMENTAL`` (mode 2).
+
+    Because the shared SQLite listener runs ``PRAGMA journal_mode=WAL`` on first
+    connect, page 1 is initialized with ``auto_vacuum=0`` even on new databases.
+    Switching ``0 -> 2`` requires ``PRAGMA auto_vacuum = INCREMENTAL`` followed by
+    a one-time ``VACUUM`` in AUTOCOMMIT mode. Subsequent boots see mode 2 and skip
+    ``VACUUM``.
+    """
+    target_engine = health_engine if engine is None else engine
+    if not _is_sqlite_engine(target_engine):
+        return False
+    try:
+        with target_engine.connect().execution_options(isolation_level="AUTOCOMMIT") as conn:
+            mode = conn.execute(text("PRAGMA auto_vacuum")).scalar()
+            if mode == 2:
+                return True
+            if not allow_vacuum:
+                return False
+            conn.execute(text("PRAGMA auto_vacuum = INCREMENTAL"))
+            conn.execute(text("VACUUM"))
+            conn.execute(text("PRAGMA wal_checkpoint(TRUNCATE)")).fetchall()
+            new_mode = conn.execute(text("PRAGMA auto_vacuum")).scalar()
+            return new_mode == 2
+    except OperationalError as e:
+        logger.debug(f"Could not enable incremental auto_vacuum on health DB: {e}")
+        return False
+    except Exception as e:
+        logger.debug(f"Unexpected error enabling incremental auto_vacuum: {e}")
+        return False
+
+
+def run_incremental_vacuum(engine=None, pages: int = 0) -> int:
+    """Reclaim freelist pages on a SQLite health DB with ``auto_vacuum=INCREMENTAL``."""
+    target_engine = health_engine if engine is None else engine
+    if not _is_sqlite_engine(target_engine):
+        return 0
+    try:
+        with target_engine.connect().execution_options(isolation_level="AUTOCOMMIT") as conn:
+            mode = conn.execute(text("PRAGMA auto_vacuum")).scalar()
+            if mode != 2:
+                return 0
+            freelist_before = int(conn.execute(text("PRAGMA freelist_count")).scalar() or 0)
+            if freelist_before <= 0:
+                return 0
+            page_limit = max(0, int(pages))
+            # SQLAlchemy's CursorResult sees cursor.description is None for
+            # PRAGMA incremental_vacuum and auto-closes after stepping 1 page
+            # (raising ResourceClosedError on .fetchall()). Step via the raw
+            # DBAPI cursor so SQLite reclaims all requested pages.
+            raw_cursor = conn.connection.cursor()
+            try:
+                raw_cursor.execute(f"PRAGMA incremental_vacuum({page_limit})")
+                raw_cursor.fetchall()
+            finally:
+                raw_cursor.close()
+            conn.execute(text("PRAGMA wal_checkpoint(TRUNCATE)")).fetchall()
+            freelist_after = int(conn.execute(text("PRAGMA freelist_count")).scalar() or 0)
+            return max(0, freelist_before - freelist_after)
+    except OperationalError as e:
+        logger.debug(f"Could not run incremental_vacuum on health DB: {e}")
+        return 0
+    except Exception as e:
+        logger.debug(f"Unexpected error running incremental_vacuum: {e}")
+        return 0
+
+
 def init_health_db():
     """Initialize the health monitoring database"""
     # Extract directory from database URL and create if it doesn't exist
-    db_path = HEALTH_DATABASE_URL.replace("sqlite:///", "")
-    db_dir = os.path.dirname(db_path)
-    if db_dir:
-        os.makedirs(db_dir, exist_ok=True)
+    db_url = str(getattr(health_engine, "url", "") or HEALTH_DATABASE_URL or "")
+    if db_url.startswith("sqlite:///"):
+        db_path = db_url[len("sqlite:///") :]
+        if db_path and db_path != ":memory:" and not db_path.startswith("file:"):
+            db_dir = os.path.dirname(db_path)
+            if db_dir:
+                os.makedirs(db_dir, exist_ok=True)
 
     from database.db_init_helper import init_db_with_logging
 
     init_db_with_logging(HealthBase, health_engine, "Health Monitoring DB", logger)
 
-
-def purge_old_metrics(days=7):
-    """
-    Purge metrics older than specified days to keep database size manageable.
-    Keep alerts forever for historical analysis.
-    """
+    # Ensure timestamp index exists on pre-existing databases too
     try:
-        cutoff = datetime.now(timezone.utc) - timedelta(days=days)
+        with health_engine.begin() as conn:
+            conn.execute(
+                text(
+                    "CREATE INDEX IF NOT EXISTS ix_health_metrics_timestamp "
+                    "ON health_metrics (timestamp)"
+                )
+            )
+    except Exception as e:
+        logger.debug(f"Could not ensure timestamp index on health_metrics: {e}")
+
+    # On brand-new (empty) SQLite databases, enable INCREMENTAL auto_vacuum right
+    # away (<1ms). Pre-existing non-empty legacy databases migrate inside
+    # purge_old_metrics() after pruning old rows so VACUUM never copies GBs of dead data.
+    if _is_sqlite_engine(health_engine):
+        try:
+            with health_engine.connect() as conn:
+                has_row = (
+                    conn.execute(text("SELECT 1 FROM health_metrics LIMIT 1")).first()
+                    is not None
+                )
+            if not has_row:
+                ensure_incremental_auto_vacuum(health_engine, allow_vacuum=True)
+        except Exception as e:
+            logger.debug(f"Could not check health_metrics emptiness during init: {e}")
+
+
+def purge_old_metrics(
+    days: int | None = None,
+    vacuum: bool = True,
+    vacuum_pages: int = 0,
+    compact_details: bool = True,
+):
+    """
+    Purge metrics older than specified days, compact stale detail JSON blobs,
+    and reclaim SQLite space via incremental vacuum. Keep alerts forever.
+    """
+    retention_days = get_health_retention_days() if days is None else max(1, int(days))
+    try:
+        cutoff = datetime.now(timezone.utc) - timedelta(days=retention_days)
 
         # Delete old metrics
         deleted = (
@@ -460,8 +741,51 @@ def purge_old_metrics(days=7):
             .delete(synchronize_session=False)
         )
 
+        compacted = 0
+        if compact_details:
+            latest_id = (
+                health_session.query(HealthMetric.id)
+                .order_by(HealthMetric.timestamp.desc(), HealthMetric.id.desc())
+                .limit(1)
+                .scalar()
+            )
+            if latest_id is not None:
+                detail_cutoff = datetime.now(timezone.utc) - timedelta(
+                    minutes=get_health_detail_retention_minutes()
+                )
+                compacted = (
+                    health_session.query(HealthMetric)
+                    .filter(
+                        HealthMetric.timestamp < detail_cutoff,
+                        HealthMetric.id != latest_id,
+                        (HealthMetric.thread_details.isnot(None))
+                        | (HealthMetric.process_details.isnot(None)),
+                    )
+                    .update(
+                        {
+                            HealthMetric.thread_details: null(),
+                            HealthMetric.process_details: null(),
+                        },
+                        synchronize_session=False,
+                    )
+                )
+
         health_session.commit()
-        logger.debug(f"Purged {deleted} old health metrics (older than {days} days)")
+        _mark_pruned()
+
+        if vacuum and _is_sqlite_engine(health_engine):
+            # Release this thread's scoped session before AUTOCOMMIT vacuum/checkpoint
+            health_session.remove()
+            mode = _get_auto_vacuum_mode(health_engine)
+            if mode != 2:
+                ensure_incremental_auto_vacuum(health_engine, allow_vacuum=True)
+            elif deleted > 0 or compacted > 0:
+                run_incremental_vacuum(health_engine, pages=vacuum_pages)
+
+        logger.debug(
+            f"Purged {deleted} old health metrics (older than {retention_days} days), "
+            f"compacted {compacted} detail payloads"
+        )
         return deleted
     except Exception as e:
         logger.exception(f"Error purging old metrics: {str(e)}")

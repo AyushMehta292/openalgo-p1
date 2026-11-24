@@ -30,11 +30,11 @@ from __future__ import annotations
 
 import atexit
 import threading
-from concurrent.futures import ThreadPoolExecutor
 from types import SimpleNamespace
 from typing import Any
 
 from database import strategy_module_db as store
+from utils.broker_context import BrokerContextThreadPoolExecutor
 from utils.env_config import env_int
 from utils.event_bus import bus
 from utils.logging import get_logger
@@ -46,7 +46,7 @@ logger = get_logger(__name__)
 # and the run state, and a filling basket delivers a burst of updates. A
 # module-level pool caps that concurrency and reuses its threads for the life
 # of the worker rather than creating one per fill.
-_POOL = ThreadPoolExecutor(
+_POOL = BrokerContextThreadPoolExecutor(
     max_workers=env_int("STRATEGY_ORDER_UPDATE_WORKERS", 4, minimum=1),
     thread_name_prefix="strategy-order-update",
 )

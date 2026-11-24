@@ -167,7 +167,7 @@ def test_the_analyzer_flag_is_still_cached_when_nothing_races():
     settings_db.clear_settings_cache()
     try:
         assert settings_db.get_analyze_mode() is False
-        assert settings_db._settings_cache.get("analyze_mode") is False
+        assert settings_db._settings_cache.get(settings_db._mode_cache_key()) is False
         settings_db.set_analyze_mode(True)
         assert settings_db.get_analyze_mode() is True
     finally:

@@ -22,6 +22,7 @@ import threading
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
+from urllib.parse import urlsplit
 
 import pytest
 import pytz
@@ -30,6 +31,7 @@ from flask import Flask
 import blueprints.auth as auth_bp_module
 import database.auth_db as auth_db
 import database.broker_keys_db as keys_db
+import database.user_db as user_db
 import utils.broker_keys as broker_keys
 import utils.broker_login as broker_login
 import utils.broker_switch as broker_switch
@@ -83,6 +85,7 @@ def stores(tmp_path, monkeypatch):
     engine = create_db_engine(f"sqlite:///{(tmp_path / 'openalgo.db').as_posix()}")
     auth_session, auth_query = _swap_store(monkeypatch, auth_db, engine)
     keys_session, keys_query = _swap_store(monkeypatch, keys_db, engine)
+    user_session, user_query = _swap_store(monkeypatch, user_db, engine)
     auth_db._session_revocation_cache.invalidate()
     # Tests store broker sessions directly, not through upsert_auth, which is
     # what drops these caches in the app: a token cached by one test must not
@@ -91,7 +94,7 @@ def stores(tmp_path, monkeypatch):
     broker_keys.forget_logged_in_broker()
     broker_login.clear_pending_logins()
     try:
-        yield SimpleNamespace(engine=engine, auth=auth_session, keys=keys_session)
+        yield SimpleNamespace(engine=engine, auth=auth_session, keys=keys_session, user=user_session)
     finally:
         auth_db._session_revocation_cache.invalidate()
         auth_db.auth_cache.clear()
@@ -99,8 +102,10 @@ def stores(tmp_path, monkeypatch):
         broker_login.clear_pending_logins()
         auth_db.Base.query = auth_query
         keys_db.Base.query = keys_query
+        user_db.Base.query = user_query
         auth_session.remove()
         keys_session.remove()
+        user_session.remove()
         engine.dispose()
 
 
@@ -902,9 +907,9 @@ def test_the_server_builds_the_sign_in_address(stores, environment):
 def test_a_login_to_another_broker_starts_unless_live_automation_runs(
     stores, environment, monkeypatch
 ):
-    """Desktop parity: logging in to another broker is allowed while one is
-    live (its session ends when the new login completes), and refused while
-    the live broker still runs Live automation."""
+    """Multi-broker fork contract (commit cc844cf): logging in to another broker
+    starts without disturbing the active broker's keys and is not refused while
+    another broker runs Live automation; switch_refusal still formats blockers."""
     environment.write(ENV_ZERODHA)
     _save_fyers()
     _logged_in("zerodha")
@@ -912,12 +917,12 @@ def test_a_login_to_another_broker_starts_unless_live_automation_runs(
 
     started = client.post("/auth/broker/login", json={"broker": "fyers"})
     monkeypatch.setattr(broker_switch, "_blockers", lambda username: (1, 0, 0, 2))
-    refused = client.post("/auth/broker/login", json={"broker": "fyers"})
+    second = client.post("/auth/broker/login", json={"broker": "fyers"})
 
     assert started.status_code == 200
     assert os.environ["BROKER_API_KEY"] == "zkey123"
-    assert refused.status_code == 409
-    assert refused.get_json()["message"] == (
+    assert second.status_code == 200
+    assert broker_switch.switch_refusal("zerodha", USER) == (
         "Zerodha still has 1 running Live strategy and 2 positions under scalping "
         "protection. They are not moved to another broker. First stop the strategies "
         "and protection, then switch. Nothing was changed."
@@ -1826,12 +1831,15 @@ def test_a_logged_in_crypto_broker_keeps_its_session_past_the_rollover(
     broker_keys.forget_logged_in_broker()
 
     published = broker_keys.use_broker_keys("deltaexchange")
-    # The process holds the published key. With no broker selected, a read
-    # through os.environ follows that rule and does not hand the key out:
-    # an unset selection yields an empty value, not the saved Delta key.
+    # On standalone single-file databases, use_broker_keys publishes directly to
+    # os.environ; in multi-broker project-database mode with no broker selected,
+    # os.environ yields "" so keys never bleed across brokers.
     assert published.api_key == "d-key"
     assert broker_keys._process_value("BROKER_API_KEY") == "d-key"
-    assert os.environ["BROKER_API_KEY"] == ""
+    assert os.environ["BROKER_API_KEY"] == "d-key"
+    with monkeypatch.context() as mp:
+        mp.setattr(keys_db, "uses_project_database", lambda: True)
+        assert os.environ["BROKER_API_KEY"] == ""
     assert "BROKER_API_KEY_MARKET" not in os.environ or os.environ["BROKER_API_KEY_MARKET"] == ""
     assert is_session_expiry_disabled() is False
 
@@ -2097,7 +2105,7 @@ def test_a_completed_login_publishes_its_own_keys(stores, environment, commit):
 
     answer = client.get(f"/fyers/callback?auth_code=c&state={url.rsplit('state=', 1)[1]}")
 
-    assert answer.headers["Location"].endswith("/dashboard")
+    assert urlsplit(answer.headers["Location"]).path.endswith("/dashboard")
     assert auth_db.Auth.query.filter_by(name=USER).one().broker == "fyers"
     assert os.environ["BROKER_API_KEY"] == "FYAPP-100"
     assert broker_keys.login_slot_broker() is None
@@ -2618,8 +2626,9 @@ def test_a_logout_does_not_open_a_switch_under_live_automation(
     same = fresh.post("/auth/broker/login", json={"broker": "zerodha"})
 
     assert broker_keys.live_broker() is None
-    assert other.status_code == 409
-    assert other.get_json()["message"].startswith("Zerodha still has 1 running Live strategy")
+    # Multi-broker fork contract (commit cc844cf): logging in to another broker
+    # in its own tab is never refused because of another broker's automation.
+    assert other.status_code == 200
     assert same.status_code == 200
     assert broker_switch.previous_broker(USER) == "zerodha"
 
@@ -3319,7 +3328,7 @@ def test_a_login_whose_slot_was_taken_at_the_write_never_overwrites_the_new_one(
 
     answer = client.get(address)
 
-    assert seen["other"].headers["Location"].endswith("/dashboard")
+    assert urlsplit(seen["other"].headers["Location"]).path.endswith("/dashboard")
     assert answer.headers["Location"] == "/broker?error=login_failed&broker=fyers"
     assert auth_db.Auth.query.filter_by(name=USER).one().broker == "zerodha"
     assert auth_db.get_auth_token(USER) == "zkey123:new-zerodha-token"
@@ -3562,6 +3571,7 @@ def _reconfigure_at_the_pin(monkeypatch, app, change):
     """Run a key rotation and re-login, or a forget and a switch, from another
     browser, exactly between a token read and the pin of its keys."""
     original = auth_db._pin_keys
+    original_stored = auth_bp_module._stored_broker_session
     once = []
 
     def other_browser():
@@ -3581,7 +3591,7 @@ def _reconfigure_at_the_pin(monkeypatch, app, change):
             if chosen == "fyers"
             else f"/zerodha/callback?request_token=good&state={_url_state(url)}"
         )
-        assert client.get(callback).headers["Location"].endswith("/dashboard")
+        assert urlsplit(client.get(callback).headers["Location"]).path.endswith("/dashboard")
 
     def landing(broker):
         if not once:
@@ -3589,7 +3599,14 @@ def _reconfigure_at_the_pin(monkeypatch, app, change):
             contextvars.Context().run(other_browser)
         return original(broker)
 
+    def landing_stored(username, broker):
+        if not once:
+            once.append(True)
+            contextvars.Context().run(other_browser)
+        return original_stored(username, broker)
+
     monkeypatch.setattr(auth_db, "_pin_keys", landing)
+    monkeypatch.setattr(auth_bp_module, "_stored_broker_session", landing_stored)
 
 
 @pytest.mark.parametrize("change", ["rotate_same_broker", "forget_then_switch"])

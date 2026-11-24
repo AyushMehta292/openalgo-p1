@@ -9,7 +9,6 @@ under Gunicorn + eventlet deployments.
 
 import json
 import time
-from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
@@ -22,12 +21,15 @@ from database.telegram_db import (
     get_bot_config,
     get_telegram_user_by_username,
 )
+from utils.broker_context import BrokerContextThreadPoolExecutor
 from utils.logging import get_logger
 
 logger = get_logger(__name__)
 
 # Thread pool for non-blocking dispatch
-alert_executor = ThreadPoolExecutor(max_workers=5, thread_name_prefix="telegram_alert")
+alert_executor = BrokerContextThreadPoolExecutor(
+    max_workers=5, thread_name_prefix="telegram_alert"
+)
 
 # Synchronous HTTP client for Telegram Bot API calls (thread-safe)
 _http_client = httpx.Client(timeout=30.0)

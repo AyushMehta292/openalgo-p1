@@ -15,7 +15,6 @@ and asks the bot service to send it.
 
 from __future__ import annotations
 
-from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from typing import Any
 
@@ -26,13 +25,16 @@ from database.whatsapp_db import (
     get_bot_config,
     get_whatsapp_user_by_username,
 )
+from utils.broker_context import BrokerContextThreadPoolExecutor
 from utils.logging import get_logger
 
 logger = get_logger(__name__)
 
 # Non-blocking dispatch pool. Bounded so a flood of orders can't spawn
 # unbounded threads. Matches the size of the Telegram alert pool.
-alert_executor = ThreadPoolExecutor(max_workers=5, thread_name_prefix="whatsapp_alert")
+alert_executor = BrokerContextThreadPoolExecutor(
+    max_workers=5, thread_name_prefix="whatsapp_alert"
+)
 
 
 class WhatsAppAlertService:

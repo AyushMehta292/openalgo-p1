@@ -439,10 +439,13 @@ def test_the_telegram_auto_start_has_one_entry_point():
     tree = ast.parse(source)
     body = None
     for node in ast.walk(tree):
-        if isinstance(node, ast.FunctionDef) and node.name == "_init_databases_and_schedulers":
+        if (
+            isinstance(node, ast.FunctionDef)
+            and node.name == "_start_services_for_selected_broker"
+        ):
             body = ast.get_source_segment(source, node)
     assert body is not None
-    start = body.index("Auto-start Telegram bot")
+    start = body.index("get_bot_config")
     block = body[start:]
     assert "initialize_bot_sync" in block
     assert "new_event_loop" not in block

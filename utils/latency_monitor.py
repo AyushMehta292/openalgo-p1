@@ -1,5 +1,5 @@
 import time
-from concurrent.futures import ThreadPoolExecutor
+from contextlib import nullcontext
 from functools import wraps
 
 from flask import g, request
@@ -8,6 +8,13 @@ from flask_restx import Resource
 from database.auth_db import db_session as auth_db_session
 from database.auth_db import get_broker_name
 from database.latency_db import OrderLatency, init_latency_db, latency_session, purge_old_data_logs
+from utils.broker_context import (
+    BROKERS,
+    BrokerContextThreadPoolExecutor,
+    broker_context,
+    current_broker,
+    sqlite_url_needs_broker,
+)
 from utils.logging import get_logger
 
 logger = get_logger(__name__)
@@ -16,7 +23,9 @@ logger = get_logger(__name__)
 # off the request thread so it never delays the order response. One worker
 # keeps writes serialized and bounds the scoped sessions to a single
 # long-lived thread.
-_latency_log_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="latency-log")
+_latency_log_executor = BrokerContextThreadPoolExecutor(
+    max_workers=1, thread_name_prefix="latency-log"
+)
 
 #: Latency records of these types are kept forever; everything else is a data
 #: query and is purged after a week. Must stay in step with the set in
@@ -56,19 +65,30 @@ def _log_latency_async(
     readable from this thread.
     """
     try:
-        broker_name = broker or (get_broker_name(api_key) if api_key else None)
-        OrderLatency.log_latency(
-            order_id=order_id,
-            user_id=user_id,
-            broker=broker_name,
-            symbol=symbol,
-            order_type=order_type,
-            latencies=latencies,
-            request_body=None,  # Not storing to save database space
-            response_body=None,  # Not storing to save database space
-            status=status,
-            error=error,
+        target_broker = broker if broker in BROKERS else current_broker()
+        if target_broker not in BROKERS:
+            bind = latency_session.get_bind()
+            if sqlite_url_needs_broker(str(getattr(bind, "url", ""))):
+                return
+        ctx = (
+            broker_context(target_broker)
+            if (target_broker in BROKERS and current_broker() != target_broker)
+            else nullcontext()
         )
+        with ctx:
+            broker_name = broker or target_broker or (get_broker_name(api_key) if api_key else None)
+            OrderLatency.log_latency(
+                order_id=order_id,
+                user_id=user_id,
+                broker=broker_name,
+                symbol=symbol,
+                order_type=order_type,
+                latencies=latencies,
+                request_body=None,  # Not storing to save database space
+                response_body=None,  # Not storing to save database space
+                status=status,
+                error=error,
+            )
     except Exception as e:
         logger.exception(f"Error logging latency asynchronously: {e}")
     finally:
@@ -286,7 +306,7 @@ def track_latency(api_type):
                     },
                     "SUCCESS" if status_code < 400 else "FAILED",
                     response_data.get("message") if status_code >= 400 else None,
-                    _session_broker() if not request_data.get("apikey") else None,
+                    current_broker() or _session_broker(),
                 )
 
                 return response
@@ -323,9 +343,7 @@ def track_latency(api_type):
                     },
                     "FAILED",
                     str(e),
-                    _session_broker()
-                    if not (has_request_data and request_data.get("apikey"))
-                    else None,
+                    current_broker() or _session_broker(),
                 )
                 raise
 

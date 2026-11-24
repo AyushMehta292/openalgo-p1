@@ -1,13 +1,14 @@
 import copy
 import importlib
 import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import as_completed
 from typing import Any, Dict, List, Optional, Tuple, Union
 
 from database.auth_db import get_auth_token_broker
 from database.settings_db import get_analyze_mode
 from events import AnalyzerErrorEvent, BasketCompletedEvent, OrderFailedEvent
 from utils.broker_backpressure import BrokerBusyError
+from utils.broker_context import BrokerContextThreadPoolExecutor
 from utils.constants import (
     REQUIRED_ORDER_FIELDS,
     VALID_ACTIONS,
@@ -366,7 +367,7 @@ def process_basket_order_with_auth(
 
         batch = orders_with_auth[batch_start : batch_start + BATCH_SIZE]
 
-        with ThreadPoolExecutor(max_workers=len(batch)) as executor:
+        with BrokerContextThreadPoolExecutor(max_workers=len(batch)) as executor:
             future_to_order = {
                 executor.submit(
                     place_single_order, order_data, broker_module, auth_token, total_orders, batch_start + idx

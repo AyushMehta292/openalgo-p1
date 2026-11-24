@@ -5,7 +5,7 @@ import re
 import sys
 import traceback
 from datetime import datetime, timedelta
-from logging.handlers import TimedRotatingFileHandler
+from logging.handlers import RotatingFileHandler, TimedRotatingFileHandler
 from pathlib import Path
 from typing import Optional
 
@@ -454,6 +454,65 @@ def cleanup_old_logs(log_dir: Path, retention_days: int):
             pass
 
 
+def _int_env(name: str, default: int, minimum: int = 0) -> int:
+    """Parse a bounded integer env var with safe fallback."""
+    raw = os.getenv(name)
+    if raw is None or raw == "":
+        return default
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        return default
+    return value if value >= minimum else default
+
+
+def _truncate_errors_file(
+    errors_file: Path,
+    max_lines: int = 1000,
+    max_tail_bytes: int = 1024 * 1024,
+) -> bool:
+    """Truncate ``errors_file`` to at most ``max_lines`` from its tail using bounded memory.
+
+    Reads at most ``max_tail_bytes`` from the end of the file so a multi-hundred-MB
+    file never causes an OOM on startup. When seeking past byte 0, the leading
+    (potentially partial or split-UTF-8) line is discarded so every retained line
+    remains complete. Writes atomically via a sibling temp file + ``os.replace``.
+    """
+    if not errors_file.exists():
+        return False
+    size = errors_file.stat().st_size
+    if size <= 0:
+        return False
+
+    read_size = min(size, max(1, int(max_tail_bytes)))
+    with open(errors_file, "rb") as f:
+        if read_size < size:
+            f.seek(size - read_size)
+        chunk = f.read(read_size)
+
+    text = chunk.decode("utf-8", errors="replace")
+    lines = text.splitlines()
+    if read_size < size and lines:
+        lines = lines[1:]
+
+    if read_size == size and len(lines) <= max_lines:
+        return False
+
+    kept = lines[-max_lines:]
+    payload = ("\n".join(kept) + "\n") if kept else ""
+    tmp_file = errors_file.with_name(f".{errors_file.name}.{os.getpid()}.tmp")
+    try:
+        tmp_file.write_text(payload, encoding="utf-8")
+        os.replace(tmp_file, errors_file)
+    except Exception:
+        try:
+            tmp_file.unlink(missing_ok=True)
+        except Exception:
+            pass
+        raise
+    return True
+
+
 def setup_logging():
     """Initialize the logging configuration from environment variables."""
     # Get configuration from environment
@@ -508,19 +567,30 @@ def setup_logging():
         root_logger.addHandler(file_handler)
 
     # JSON error log — always active, captures ERROR+ to log/errors.jsonl
-    # Truncate to last 1000 entries on startup to prevent unbounded growth
+    # Bounded tail-truncation on startup avoids OOM on large legacy files, and
+    # RotatingFileHandler caps runtime growth (default: 10 MiB x 3 backups = 40 MiB max).
+    error_log_max_bytes = _int_env("ERROR_LOG_MAX_BYTES", 10 * 1024 * 1024, minimum=0)
+    error_log_backup_count = _int_env("ERROR_LOG_BACKUP_COUNT", 3, minimum=0)
+    error_log_startup_max_lines = _int_env("ERROR_LOG_STARTUP_MAX_LINES", 1000, minimum=1)
+    error_log_startup_tail_bytes = _int_env(
+        "ERROR_LOG_STARTUP_TAIL_BYTES", 1 * 1024 * 1024, minimum=1
+    )
+
     errors_dir = Path(log_dir)
-    errors_dir.mkdir(exist_ok=True)
+    errors_dir.mkdir(parents=True, exist_ok=True)
     errors_file = errors_dir / "errors.jsonl"
     try:
-        if errors_file.exists() and errors_file.stat().st_size > 0:
-            lines = errors_file.read_text(encoding="utf-8").splitlines()
-            if len(lines) > 1000:
-                errors_file.write_text("\n".join(lines[-1000:]) + "\n", encoding="utf-8")
+        _truncate_errors_file(
+            errors_file,
+            max_lines=error_log_startup_max_lines,
+            max_tail_bytes=error_log_startup_tail_bytes,
+        )
     except Exception:
         pass
-    json_handler = logging.FileHandler(
+    json_handler = RotatingFileHandler(
         filename=str(errors_file),
+        maxBytes=error_log_max_bytes,
+        backupCount=error_log_backup_count,
         encoding="utf-8",
     )
     json_handler.setLevel(logging.ERROR)
